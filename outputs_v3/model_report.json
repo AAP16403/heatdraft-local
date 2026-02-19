@@ -1,0 +1,257 @@
+{
+  "input_file": "Nature paper.xlsx",
+  "target": "Removal rate (%)",
+  "high_threshold": 90.0,
+  "rows_total": 1501,
+  "high_rows": 760,
+  "low_rows": 741,
+  "features_raw": 53,
+  "features_final": 24,
+  "winner": "xgboost",
+  "masking_report": {},
+  "feature_selection": {
+    "steps": {
+      "sparsity": {
+        "dropped": [],
+        "remaining": 53
+      },
+      "near_zero_variance": {
+        "dropped": [],
+        "remaining": 53
+      },
+      "correlation": {
+        "original_features": 53,
+        "clusters": [
+          {
+            "kept": "RD_MW",
+            "dropped": [
+              "Compound Mw (g/mol)",
+              "Compound stokes radius rs (nm)"
+            ],
+            "size": 3
+          },
+          {
+            "kept": "Compound size (nm)",
+            "dropped": [
+              "Max projection (\u00c5)"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "Compound log K ow",
+            "dropped": [
+              "RD_LogP"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "log D (pH=5.5)",
+            "dropped": [
+              "log D (pH=7.4)"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "MinPartialCharge",
+            "dropped": [
+              "MaxPartialCharge"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "MB pore radius rp (nm)",
+            "dropped": [
+              "MB MWCO (Da)"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "MB zeta potential (mV)",
+            "dropped": [
+              "MB surface charge density , \u03c3m (mC\u00b7m-2)"
+            ],
+            "size": 2
+          }
+        ],
+        "dropped": [
+          "Compound Mw (g/mol)",
+          "Compound charge",
+          "Compound size (nm)",
+          "Compound stokes radius rs (nm)",
+          "MB MWCO (Da)",
+          "MB surface charge density , \u03c3m (mC\u00b7m-2)",
+          "Max projection (\u00c5)",
+          "MaxPartialCharge",
+          "Min projection (\u00c5)",
+          "RD_HBA",
+          "RD_LogP",
+          "log D (pH=7.4)",
+          "\u03a6S"
+        ],
+        "kept": [
+          "A",
+          "B",
+          "CAS",
+          "Compound log K ow",
+          "Density (g\u00b7cm-3)",
+          "Diffusion coefficient (cm2\u00b7s-1)",
+          "E",
+          "Initial concentration of compound (mg/L)",
+          "MB contact angle (\u00b0)",
+          "MB pore radius rp (nm)",
+          "MB surface energy, \u03b3m (J\u00b7m-2)",
+          "MB volume charge density, \u03b4m (mol\u00b7m-3)",
+          "MB zeta potential (mV)",
+          "Measurement time (min)",
+          "MinPartialCharge",
+          "Name of MB",
+          "Pressure (kPa)",
+          "RD_FracCSP3",
+          "RD_HBD",
+          "RD_MW",
+          "RD_Rings",
+          "RD_RotBonds",
+          "RD_TPSA",
+          "RMS roughness (nm)",
+          "Reference",
+          "S",
+          "SMILES",
+          "Surface tension \u03b3s (dyne\u00b7cm-1)",
+          "Total charge",
+          "Type of MB",
+          "Types of contaminants",
+          "V",
+          "WS (mg/L)",
+          "log D (pH=5.5)",
+          "pH",
+          "pKa1",
+          "pKa2",
+          "rs/rp",
+          "\u03a6D",
+          "\u2206Gs-m (J\u00b7m-2)"
+        ],
+        "final_features": 40,
+        "n_dropped": 13
+      },
+      "vif": {
+        "dropped": [
+          "V",
+          "rs/rp",
+          "RD_MW",
+          "MB zeta potential (mV)",
+          "MB surface energy, \u03b3m (J\u00b7m-2)",
+          "E",
+          "RD_TPSA",
+          "S",
+          "pH",
+          "B",
+          "Surface tension \u03b3s (dyne\u00b7cm-1)",
+          "Density (g\u00b7cm-3)",
+          "pKa2",
+          "MB pore radius rp (nm)",
+          "MB contact angle (\u00b0)",
+          "RD_HBD"
+        ],
+        "remaining": 24
+      }
+    },
+    "n_start": 53,
+    "n_final": 24,
+    "total_dropped": 29
+  },
+  "metrics": [
+    {
+      "model": "xgboost",
+      "rmse_high": 1.8365976027065047,
+      "mae_high": 1.1273764392934484,
+      "r2_high": 0.6113060167506581,
+      "high_hit_rate": 0.9868421052631579,
+      "r2_global": -3196.08156771962,
+      "rmse_global": 1619.569625107142
+    },
+    {
+      "model": "random_forest",
+      "rmse_high": 1.9023614627907401,
+      "mae_high": 1.335014448489853,
+      "r2_high": 0.5829713702357101,
+      "high_hit_rate": 1.0,
+      "r2_global": -0.16373604889239735,
+      "rmse_global": 30.899397300397755
+    },
+    {
+      "model": "stacking_top3",
+      "rmse_high": 1.9584993382590854,
+      "mae_high": 1.3066085307644006,
+      "r2_high": 0.5579955414497477,
+      "high_hit_rate": 1.0,
+      "r2_global": -0.24676406671161422,
+      "rmse_global": 31.982683706979838
+    },
+    {
+      "model": "extra_trees",
+      "rmse_high": 3.1966827741402697,
+      "mae_high": 1.4766846667496984,
+      "r2_high": -0.17754868941560065,
+      "high_hit_rate": 0.9802631578947368,
+      "r2_global": 0.06805355236743504,
+      "rmse_global": 27.65147122324162
+    },
+    {
+      "model": "hist_gb",
+      "rmse_high": 4.525935257232869,
+      "mae_high": 1.644103276467434,
+      "r2_high": -1.3604590261515734,
+      "high_hit_rate": 0.9802631578947368,
+      "r2_global": -3991.472863755268,
+      "rmse_global": 1809.8548718828217
+    }
+  ],
+  "low_zone_diagnostics": {
+    "low_rows": 741,
+    "false_high_rate": 0.3117408906882591,
+    "mean_overprediction": -263.88660044785377,
+    "low_rmse": 1633.5125533458208,
+    "low_mae": 295.22149211634274
+  },
+  "best_params": {
+    "xgboost": {
+      "n_estimators": 689,
+      "learning_rate": 0.06564989688499019,
+      "max_depth": 10,
+      "min_child_weight": 3.788352951011637,
+      "subsample": 0.972345036343966,
+      "colsample_bytree": 0.7025388006081699,
+      "reg_alpha": 0.001027737662961691,
+      "reg_lambda": 1.5971588936693395e-07,
+      "gamma": 4.509909580784514
+    },
+    "extra_trees": {
+      "n_estimators": 482,
+      "max_depth": 23,
+      "min_samples_split": 3,
+      "min_samples_leaf": 1,
+      "max_features": 0.5690540715553176
+    },
+    "random_forest": {
+      "n_estimators": 619,
+      "max_depth": 26,
+      "min_samples_split": 17,
+      "min_samples_leaf": 1,
+      "max_features": 0.3746134401189478
+    },
+    "hist_gb": {
+      "learning_rate": 0.15601774858655262,
+      "max_depth": 16,
+      "max_leaf_nodes": 101,
+      "min_samples_leaf": 11,
+      "l2_regularization": 0.00013412292638966385
+    }
+  },
+  "artifacts": {
+    "dashboard": "outputs_v3\\dashboard.png",
+    "low_zone_diagnostics": "outputs_v3\\low_zone_diagnostics.json",
+    "low_zone_feature_gaps": "outputs_v3\\low_zone_feature_gaps.csv",
+    "correlation_heatmap": "outputs_v3\\correlation_heatmap.png",
+    "feature_gaps": "outputs_v3\\feature_gaps.png"
+  }
+}

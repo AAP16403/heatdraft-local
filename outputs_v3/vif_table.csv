@@ -1,0 +1,19 @@
+feature,VIF
+"MB volume charge density, δm (mol·m-3)",7.972
+ΦD,7.814
+Compound log K ow,6.998
+pKa1,6.4
+log D (pH=5.5),4.804
+Total charge,4.535
+∆Gs-m (J·m-2),4.49
+Pressure (kPa),4.371
+RD_FracCSP3,4.36
+RD_RotBonds,4.136
+A,3.899
+RD_Rings,3.722
+RMS roughness (nm),3.041
+MinPartialCharge,2.21
+Diffusion coefficient (cm2·s-1),1.812
+WS (mg/L),1.781
+Measurement time (min),1.335
+Initial concentration of compound (mg/L),1.213

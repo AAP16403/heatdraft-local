@@ -1,0 +1,104 @@
+{
+  "input_file": "F:\\heatdraft local\\Nature paper.xlsx",
+  "target": "Removal rate (%)",
+  "high_threshold": 90.0,
+  "rows": 1501,
+  "high_rows": 760,
+  "low_rows": 741,
+  "features": 53,
+  "winner": "stacking_top3",
+  "metrics": [
+    {
+      "model": "stacking_top3",
+      "rmse_high": 5.006213776796117,
+      "mae_high": 2.0457365404638668,
+      "r2_high": -1.8880092103423598,
+      "high_hit_rate": 0.9605263157894737,
+      "r2_global": 0.6964523835938388,
+      "rmse_global": 15.781060259135552
+    },
+    {
+      "model": "hist_gb",
+      "rmse_high": 5.672700746838592,
+      "mae_high": 2.1267005897937,
+      "r2_high": -2.7081691744269056,
+      "high_hit_rate": 0.9276315789473685,
+      "r2_global": 0.7471507405650415,
+      "rmse_global": 14.403021456912388
+    },
+    {
+      "model": "extra_trees",
+      "rmse_high": 6.4691059354448655,
+      "mae_high": 2.3687614621032975,
+      "r2_high": -3.82245648946909,
+      "high_hit_rate": 0.9210526315789473,
+      "r2_global": 0.7386200954530071,
+      "rmse_global": 14.643971068984367
+    },
+    {
+      "model": "xgboost",
+      "rmse_high": 6.512176963968465,
+      "mae_high": 2.4405740047454834,
+      "r2_high": -3.8868856761553623,
+      "high_hit_rate": 0.9210526315789473,
+      "r2_global": 0.7784775204155987,
+      "rmse_global": 13.481296694261442
+    },
+    {
+      "model": "random_forest",
+      "rmse_high": 7.06588259899117,
+      "mae_high": 3.164581689772626,
+      "r2_high": -4.753241790204588,
+      "high_hit_rate": 0.875,
+      "r2_global": 0.7111990850187235,
+      "rmse_global": 15.392956678482205
+    }
+  ],
+  "low_zone_diagnostics": {
+    "low_rows": 741,
+    "false_high_rate": 0.11201079622132254,
+    "mean_overprediction": 8.997533427654526,
+    "low_rmse": 13.439771566731894,
+    "low_mae": 9.873721471318841
+  },
+  "best_params": {
+    "xgboost": {
+      "n_estimators": 796,
+      "learning_rate": 0.042220255532141586,
+      "max_depth": 11,
+      "min_child_weight": 12.877673516173823,
+      "subsample": 0.8735666653164389,
+      "colsample_bytree": 0.5020132464766291,
+      "reg_alpha": 3.442529910696539e-07,
+      "reg_lambda": 0.002995706553789195,
+      "gamma": 3.3199087450384632
+    },
+    "extra_trees": {
+      "n_estimators": 901,
+      "max_depth": 37,
+      "min_samples_split": 2,
+      "min_samples_leaf": 3,
+      "max_features": 0.7787962388191513
+    },
+    "random_forest": {
+      "n_estimators": 925,
+      "max_depth": 30,
+      "min_samples_split": 2,
+      "min_samples_leaf": 2,
+      "max_features": 0.7502853171030556
+    },
+    "hist_gb": {
+      "learning_rate": 0.14441617210603777,
+      "max_depth": 13,
+      "max_leaf_nodes": 103,
+      "min_samples_leaf": 13,
+      "l2_regularization": 3.0854851528240775e-05
+    }
+  },
+  "artifacts": {
+    "predicted_vs_actual_high_zone": "outputs\\predicted_vs_actual_high_zone.png",
+    "low_zone_diagnostics": "outputs\\low_zone_diagnostics.json",
+    "low_zone_feature_gaps": "outputs\\low_zone_feature_gaps.csv",
+    "low_zone_feature_gaps_visualization": "outputs\\low_zone_feature_gaps_visualization.png"
+  }
+}

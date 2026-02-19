@@ -1,0 +1,13 @@
+feature,high_train_median,low_median,abs_gap
+WS (mg/L),553.0,793.0,240.0
+Pressure (kPa),725.0,552.0,173.0
+RMS roughness (nm),60.2,9.0,51.2
+Measurement time (min),30.0,10.0,20.0
+pKa1,5.41,7.9,2.49
+"MB volume charge density, δm (mol·m-3)",-84.0010581590725,-82.5680260382328,1.433032120839698
+RD_RotBonds,3.0,2.0,1.0
+Initial concentration of compound (mg/L),0.8,0.292378,0.507622
+RD_FracCSP3,0.5,0.3,0.2
+Compound log K ow,1.781,1.631,0.1499999999999999
+log D (pH=5.5),1.13,1.0,0.1299999999999999
+A,0.58,0.5,0.07999999999999996
