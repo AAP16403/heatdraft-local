@@ -7,7 +7,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import optuna
 import seaborn as sns
 import xgboost as xgb
@@ -534,6 +533,14 @@ def tune_model(
 def target_transform(y: Union[pd.Series, np.ndarray]) -> np.ndarray:
     eps = 1e-4
     v = np.array(y, dtype=float)
+    if np.isnan(v).any():
+        raise ValueError("Target contains NaN values before transform.")
+    if ((v < 0.0) | (v > 100.0)).any():
+        bad_min = float(np.min(v))
+        bad_max = float(np.max(v))
+        raise ValueError(
+            f"Target values must be within [0, 100]. Found range [{bad_min:.4f}, {bad_max:.4f}]."
+        )
     p = np.clip(v / 100.0, eps, 1.0 - eps)
     return np.log(p / (1.0 - p))
 
@@ -578,13 +585,7 @@ def build_low_failure_report(
     high_threshold: float,
 ) -> Tuple[Dict[str, float], pd.DataFrame]:
     if len(X_low) == 0:
-        return {
-            "low_rows": 0,
-            "false_high_rate": float("nan"),
-            "mean_overprediction": float("nan"),
-            "low_rmse": float("nan"),
-            "low_mae": float("nan"),
-        }, pd.DataFrame()
+        raise RuntimeError("No low-performance rows available for low-zone diagnostics.")
 
     preds_trans = best_model.predict(X_low)
     preds_low = pd.Series(target_inverse_transform(preds_trans), index=X_low.index)
@@ -615,6 +616,44 @@ def build_low_failure_report(
     prof["abs_gap"] = (prof["low_median"] - prof["high_train_median"]).abs()
     prof = prof.sort_values("abs_gap", ascending=False).head(12)
     return summary, prof.reset_index().rename(columns={"index": "feature"})
+
+
+def validate_pipeline_integrity(
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    X_full: pd.DataFrame,
+    y_train_orig: pd.Series,
+    y_test_orig: pd.Series,
+    y_train_trans: pd.Series,
+) -> None:
+    if X_train.empty:
+        raise RuntimeError("Integrity check failed: X_train is empty.")
+    if X_train.shape[1] == 0:
+        raise RuntimeError("Integrity check failed: no features remain after preprocessing.")
+
+    for name, frame in [("X_train", X_train), ("X_test", X_test), ("X_full", X_full)]:
+        if frame.columns.duplicated().any():
+            dup = frame.columns[frame.columns.duplicated()].tolist()
+            raise RuntimeError(f"Integrity check failed: duplicate columns in {name}: {dup}")
+
+    expected_cols = X_train.columns.tolist()
+    if X_test.columns.tolist() != expected_cols:
+        raise RuntimeError("Integrity check failed: X_test columns/order do not match X_train.")
+    if X_full.columns.tolist() != expected_cols:
+        raise RuntimeError("Integrity check failed: X_full columns/order do not match X_train.")
+
+    if not X_train.index.equals(y_train_orig.index):
+        raise RuntimeError("Integrity check failed: X_train index does not match y_train_orig index.")
+    if not X_test.index.equals(y_test_orig.index):
+        raise RuntimeError("Integrity check failed: X_test index does not match y_test_orig index.")
+    if not y_train_trans.index.equals(y_train_orig.index):
+        raise RuntimeError("Integrity check failed: y_train_trans index does not match y_train_orig index.")
+
+    overlap = X_train.index.intersection(X_test.index)
+    if len(overlap) > 0:
+        raise RuntimeError(
+            f"Integrity check failed: train/test index overlap detected ({len(overlap)} rows)."
+        )
 
 
 class KMeansMoERegressor:
@@ -748,6 +787,11 @@ def main() -> None:
     X_raw = df.drop(columns=[target_col] + leak_cols)
     y = df[target_col]
     high_mask_all = y >= args.high_threshold
+    low_mask_all = ~high_mask_all
+    if high_mask_all.sum() < 2 or low_mask_all.sum() < 2:
+        raise RuntimeError(
+            "Need at least 2 high-threshold and 2 low-threshold rows for a valid split."
+        )
 
     X_train_raw, X_test_raw, y_train_orig, y_test_orig = train_test_split(
         X_raw,
@@ -796,6 +840,14 @@ def main() -> None:
     print("Applying stable logit target transform on percentage target...")
     y_train_trans = pd.Series(target_transform(y_train_orig), index=y_train_orig.index)
     high_threshold_trans = target_transform([args.high_threshold])[0]
+    validate_pipeline_integrity(
+        X_train=X_train,
+        X_test=X_test,
+        X_full=X_full,
+        y_train_orig=y_train_orig,
+        y_test_orig=y_test_orig,
+        y_train_trans=y_train_trans,
+    )
 
     high_train_count = int((y_train_orig >= args.high_threshold).sum())
     low_train_count = int((y_train_orig < args.high_threshold).sum())
@@ -848,7 +900,9 @@ def main() -> None:
     X_test_high = X_test[test_high_mask]
     y_test_high_orig = y_test_orig[test_high_mask]
     if len(X_test_high) == 0:
-        print("Warning: No high-performance rows in test set. Evaluation metrics for High-Zone will be NaN.")
+        raise RuntimeError(
+            "No high-performance rows in test split. Cannot compute high-zone metrics."
+        )
 
     for name in model_names:
         print(f"- Tuning {name} ({per_model_trials} trials)")
@@ -867,15 +921,9 @@ def main() -> None:
         preds_trans = model.predict(X_test)
         preds_orig = target_inverse_transform(preds_trans)
         global_metrics = evaluate(name, y_test_orig, preds_orig)
-        if len(X_test_high) > 0:
-            preds_high_trans = model.predict(X_test_high)
-            preds_high_orig = target_inverse_transform(preds_high_trans)
-            h_metrics = evaluate_high_focus(name, y_test_high_orig, preds_high_orig, args.high_threshold)
-        else:
-            h_metrics = {
-                "model": name, "rmse_high": float("nan"), "mae_high": float("nan"),
-                "r2_high": float("nan"), "high_hit_rate": 0.0
-            }
+        preds_high_trans = model.predict(X_test_high)
+        preds_high_orig = target_inverse_transform(preds_high_trans)
+        h_metrics = evaluate_high_focus(name, y_test_high_orig, preds_high_orig, args.high_threshold)
         combined = {**h_metrics, "r2_global": global_metrics["r2"], "rmse_global": global_metrics["rmse"]}
         metrics_high.append(combined)
 
@@ -910,15 +958,9 @@ def main() -> None:
     stack_preds_trans = final_stack_pipe.predict(X_test)
     stack_preds_orig = target_inverse_transform(stack_preds_trans)
     global_metrics_stack = evaluate("stacking_top3", y_test_orig, stack_preds_orig)
-    if len(X_test_high) > 0:
-        stack_preds_high_trans = final_stack_pipe.predict(X_test_high)
-        stack_preds_high_orig = target_inverse_transform(stack_preds_high_trans)
-        stack_metrics = evaluate_high_focus("stacking_top3", y_test_high_orig, stack_preds_high_orig, args.high_threshold)
-    else:
-        stack_metrics = {
-             "model": "stacking_top3", "rmse_high": float("nan"), "mae_high": float("nan"),
-             "r2_high": float("nan"), "high_hit_rate": 0.0
-        }
+    stack_preds_high_trans = final_stack_pipe.predict(X_test_high)
+    stack_preds_high_orig = target_inverse_transform(stack_preds_high_trans)
+    stack_metrics = evaluate_high_focus("stacking_top3", y_test_high_orig, stack_preds_high_orig, args.high_threshold)
     stack_metrics["r2_global"] = global_metrics_stack["r2"]
     stack_metrics["rmse_global"] = global_metrics_stack["rmse"]
     metrics_high.append(stack_metrics)
@@ -941,15 +983,9 @@ def main() -> None:
         moe_preds_orig = target_inverse_transform(moe_preds_trans)
         moe_global = evaluate("moe_kmeans2", y_test_orig, moe_preds_orig)
 
-        if len(X_test_high) > 0:
-            moe_preds_high_trans = moe_model.predict(X_test_high)
-            moe_preds_high_orig = target_inverse_transform(moe_preds_high_trans)
-            moe_high = evaluate_high_focus("moe_kmeans2", y_test_high_orig, moe_preds_high_orig, args.high_threshold)
-        else:
-            moe_high = {
-                "model": "moe_kmeans2", "rmse_high": float("nan"), "mae_high": float("nan"),
-                "r2_high": float("nan"), "high_hit_rate": 0.0
-            }
+        moe_preds_high_trans = moe_model.predict(X_test_high)
+        moe_preds_high_orig = target_inverse_transform(moe_preds_high_trans)
+        moe_high = evaluate_high_focus("moe_kmeans2", y_test_high_orig, moe_preds_high_orig, args.high_threshold)
         moe_high["r2_global"] = moe_global["r2"]
         moe_high["rmse_global"] = moe_global["rmse"]
         metrics_high.append(moe_high)
@@ -970,99 +1006,202 @@ def main() -> None:
     else:
         best_model = fitted_models[winner]
 
-    preds_plot_trans = best_model.predict(X_test_high if len(X_test_high) > 0 else X_test)
-    preds_plot = target_inverse_transform(preds_plot_trans)
-    y_plot = y_test_high_orig if len(X_test_high) > 0 else y_test_orig
+    figures_dir = outdir / "figures"
+    data_dir = outdir / "data"
+    reports_dir = outdir / "reports"
+    for p in [figures_dir, data_dir, reports_dir]:
+        p.mkdir(parents=True, exist_ok=True)
 
-    fig = plt.figure(figsize=(16, 13))
-    gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.38, wspace=0.32)
+    preds_test_trans = best_model.predict(X_test)
+    preds_test_orig = target_inverse_transform(preds_test_trans)
+    test_predictions = pd.DataFrame(
+        {
+            "row_id": X_test.index.map(str),
+            "actual": y_test_orig.loc[X_test.index].astype(float).values,
+            "predicted": preds_test_orig,
+        },
+        index=X_test.index,
+    )
+    test_predictions["residual"] = test_predictions["predicted"] - test_predictions["actual"]
+    test_predictions["abs_error"] = test_predictions["residual"].abs()
+    test_predictions["zone"] = np.where(
+        test_predictions["actual"] >= args.high_threshold, "high", "low"
+    )
 
-    ax0 = fig.add_subplot(gs[0, 0])
-    ax0.scatter(y_plot, preds_plot, alpha=0.75, edgecolors="black",
-                linewidths=0.25, color="#1976D2", s=60)
-    lo = min(float(y_plot.min()), float(preds_plot.min()))
-    hi = max(float(y_plot.max()), float(preds_plot.max()))
-    ax0.plot([lo, hi], [lo, hi], "r--", linewidth=1.5, label="Ideal")
-    r2v = r2_score(y_plot, preds_plot) if len(y_plot) > 1 else 0
-    maev = mean_absolute_error(y_plot, preds_plot)
+    high_plot = test_predictions[test_predictions["zone"] == "high"].copy()
+    if high_plot.empty:
+        raise RuntimeError("No high-zone rows available for visualization.")
+
+    sns.set_theme(style="whitegrid", context="notebook")
+    zone_palette = {"high": "#0B7285", "low": "#C92A2A"}
+
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+
+    ax0 = axes[0, 0]
+    sns.scatterplot(
+        data=test_predictions,
+        x="actual",
+        y="predicted",
+        hue="zone",
+        palette=zone_palette,
+        s=70,
+        alpha=0.85,
+        edgecolor="black",
+        linewidth=0.3,
+        ax=ax0,
+    )
+    lo = min(float(test_predictions["actual"].min()), float(test_predictions["predicted"].min()))
+    hi = max(float(test_predictions["actual"].max()), float(test_predictions["predicted"].max()))
+    ax0.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1.5, color="#1F2937", label="Ideal")
+    ax0.axvline(args.high_threshold, linestyle=":", linewidth=1.2, color="#6B7280")
+    ax0.axhline(args.high_threshold, linestyle=":", linewidth=1.2, color="#6B7280")
+    ax0.set_title(f"Predicted vs Actual (Test) | Winner: {winner}")
     ax0.set_xlabel("Actual Removal Rate (%)")
-    ax0.set_ylabel("Predicted")
-    ax0.set_title(f"Predicted vs Actual — High Zone\n{winner}  |  R2={r2v:.3f}  MAE={maev:.2f}")
-    ax0.legend(fontsize=9)
-    ax0.grid(alpha=0.3)
+    ax0.set_ylabel("Predicted Removal Rate (%)")
+    ax0.grid(alpha=0.2)
+    ax0.legend(loc="upper left", fontsize=9)
 
-    ax1 = fig.add_subplot(gs[0, 1])
-    residuals = preds_plot - y_plot
-    ax1.scatter(y_plot, residuals, alpha=0.7, edgecolors="black",
-                linewidths=0.25, color="#F57C00", s=60)
-    ax1.axhline(0, color="red", linestyle="--", linewidth=1.5)
-    ax1.set_xlabel("Actual Removal Rate (%)")
-    ax1.set_ylabel("Residual (Predicted - Actual)")
-    ax1.set_title("Residual Plot — High Zone")
-    ax1.grid(alpha=0.3)
+    ax1 = axes[0, 1]
+    sns.histplot(
+        data=test_predictions,
+        x="residual",
+        hue="zone",
+        bins=24,
+        stat="density",
+        common_norm=False,
+        element="step",
+        palette=zone_palette,
+        ax=ax1,
+    )
+    ax1.axvline(0, linestyle="--", linewidth=1.4, color="#1F2937")
+    ax1.set_title("Residual Distribution (Test)")
+    ax1.set_xlabel("Residual (Predicted - Actual)")
+    ax1.set_ylabel("Density")
+    ax1.grid(alpha=0.2)
 
-    ax2 = fig.add_subplot(gs[1, 0])
-    m_plot = final_metrics.dropna(subset=["r2_high"]).copy()
-    colors = ["#2E7D32" if m == winner else "#90CAF9" for m in m_plot["model"]]
-    bars = ax2.barh(m_plot["model"], m_plot["r2_high"],
-                    color=colors, edgecolor="black", linewidth=0.5)
-    ax2.axvline(0, color="red", linestyle="--", linewidth=0.8)
-    for bar, val in zip(bars, m_plot["r2_high"]):
-        ax2.text(bar.get_width() + 0.005, bar.get_y() + bar.get_height()/2,
-                 f"{val:.3f}", va="center", fontsize=9)
-    ax2.set_xlabel("R2 (High Zone)")
-    ax2.set_title("Model R2 Comparison (High Zone)")
-    ax2.grid(axis="x", alpha=0.3)
+    ax2 = axes[1, 0]
+    for _, row in final_metrics.iterrows():
+        marker_color = "#2B8A3E" if row["model"] == winner else "#1C7ED6"
+        ax2.scatter(
+            row["rmse_high"],
+            row["r2_high"],
+            s=140,
+            color=marker_color,
+            edgecolor="black",
+            linewidth=0.4,
+        )
+        ax2.text(
+            row["rmse_high"] + 0.02,
+            row["r2_high"],
+            str(row["model"]),
+            fontsize=9,
+            va="center",
+        )
+    ax2.axhline(0, linestyle="--", linewidth=1.0, color="#9CA3AF")
+    ax2.set_title("Model Frontier (High-Zone Metrics)")
+    ax2.set_xlabel("RMSE (High Zone)")
+    ax2.set_ylabel("R2 (High Zone)")
+    ax2.grid(alpha=0.2)
 
-    ax3 = fig.add_subplot(gs[1, 1])
-    colors_mae = ["#2E7D32" if m == winner else "#EF9A9A" for m in m_plot["model"]]
-    bars_mae = ax3.barh(m_plot["model"], m_plot["mae_high"],
-                        color=colors_mae, edgecolor="black", linewidth=0.5)
-    for bar, val in zip(bars_mae, m_plot["mae_high"]):
-        ax3.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2,
-                 f"{val:.2f}", va="center", fontsize=9)
-    ax3.set_xlabel("MAE (High Zone)")
-    ax3.set_title("Model MAE Comparison (High Zone)\n(lower is better)")
-    ax3.grid(axis="x", alpha=0.3)
+    ax3 = axes[1, 1]
+    worst = test_predictions.nlargest(min(12, len(test_predictions)), "abs_error").sort_values("abs_error")
+    ax3.barh(
+        worst["row_id"],
+        worst["abs_error"],
+        color="#F08C00",
+        edgecolor="black",
+        linewidth=0.4,
+    )
+    ax3.set_title("Largest Absolute Errors (Test)")
+    ax3.set_xlabel("Absolute Error")
+    ax3.set_ylabel("Row ID")
+    ax3.grid(axis="x", alpha=0.2)
 
-    plt.suptitle(f"HeatDraft ML Pipeline — Best Model: {winner}",
-                 fontsize=14, fontweight="bold", y=1.01)
-    dashboard_path = outdir / "dashboard.png"
-    plt.savefig(dashboard_path, dpi=160, bbox_inches="tight")
+    plt.suptitle("HeatDraft Evaluation Dashboard", fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    dashboard_path = figures_dir / "performance_dashboard.png"
+    plt.savefig(dashboard_path, dpi=170, bbox_inches="tight")
+    plt.close()
+
+    n_bins = min(8, int(test_predictions["actual"].nunique()))
+    if n_bins >= 2:
+        calib_df = test_predictions.copy()
+        calib_df["actual_bin"] = pd.qcut(calib_df["actual"], q=n_bins, duplicates="drop")
+        calibration = (
+            calib_df.groupby("actual_bin", observed=False)
+            .agg(actual_mean=("actual", "mean"), predicted_mean=("predicted", "mean"), count=("actual", "size"))
+            .reset_index(drop=True)
+        )
+    else:
+        calibration = pd.DataFrame(
+            {
+                "actual_mean": [float(test_predictions["actual"].mean())],
+                "predicted_mean": [float(test_predictions["predicted"].mean())],
+                "count": [int(len(test_predictions))],
+            }
+        )
+
+    fig_cal, ax_cal = plt.subplots(figsize=(8.5, 7))
+    ax_cal.plot(
+        calibration["actual_mean"],
+        calibration["predicted_mean"],
+        marker="o",
+        linewidth=2.0,
+        color="#1971C2",
+    )
+    cal_lo = min(float(test_predictions["actual"].min()), float(test_predictions["predicted"].min()))
+    cal_hi = max(float(test_predictions["actual"].max()), float(test_predictions["predicted"].max()))
+    ax_cal.plot([cal_lo, cal_hi], [cal_lo, cal_hi], linestyle="--", linewidth=1.5, color="#1F2937")
+    for _, r in calibration.iterrows():
+        ax_cal.text(float(r["actual_mean"]) + 0.1, float(r["predicted_mean"]), f"n={int(r['count'])}", fontsize=8)
+    ax_cal.set_title("Calibration by Actual-Value Quantiles (Test)")
+    ax_cal.set_xlabel("Actual Mean")
+    ax_cal.set_ylabel("Predicted Mean")
+    ax_cal.grid(alpha=0.25)
+    plt.tight_layout()
+    calibration_path = figures_dir / "calibration_curve.png"
+    plt.savefig(calibration_path, dpi=170, bbox_inches="tight")
     plt.close()
 
     heatmap_path = None
     if not args.no_feature_drop and X_train_pre.shape[1] <= 80:
         num_before = X_train_pre.select_dtypes(include=[np.number]).columns.tolist()
         num_after = X_train.select_dtypes(include=[np.number]).columns.tolist()
-        fig2, axes2 = plt.subplots(1, 2, figsize=(max(12, len(num_before)//2),
-                                                  max(9, len(num_before)//2)))
+        fig2, axes2 = plt.subplots(1, 2, figsize=(max(12, len(num_before) // 2), max(9, len(num_before) // 2)))
         for ax_corr, cols, title in [
             (axes2[0], num_before, f"Before Dropping ({len(num_before)} features)"),
             (axes2[1], num_after, f"After Dropping ({len(num_after)} features)"),
         ]:
             if len(cols) > 0:
-                data = X_train_pre[cols].fillna(X_train_pre[cols].median()) if "Before" in title \
-                       else X_train[cols].fillna(X_train[cols].median())
+                data = X_train_pre[cols].fillna(X_train_pre[cols].median()) if "Before" in title else X_train[cols].fillna(X_train[cols].median())
                 corr_mat = data.corr(method="pearson")
                 mask_tri = np.triu(np.ones_like(corr_mat, dtype=bool))
-                sns.heatmap(corr_mat, mask=mask_tri, ax=ax_corr, cmap="coolwarm",
-                            center=0, vmin=-1, vmax=1, square=True,
-                            linewidths=0.3, annot=len(cols)<=20,
-                            fmt=".1f", annot_kws={"size": 7})
+                sns.heatmap(
+                    corr_mat,
+                    mask=mask_tri,
+                    ax=ax_corr,
+                    cmap="coolwarm",
+                    center=0,
+                    vmin=-1,
+                    vmax=1,
+                    square=True,
+                    linewidths=0.3,
+                    annot=len(cols) <= 20,
+                    fmt=".1f",
+                    annot_kws={"size": 7},
+                )
                 ax_corr.set_title(title, fontsize=11, fontweight="bold")
                 ax_corr.tick_params(axis="x", rotation=45, labelsize=7)
                 ax_corr.tick_params(axis="y", rotation=0, labelsize=7)
-        plt.suptitle("Pearson Correlation: Before vs After Feature Dropping",
-                     fontsize=13, fontweight="bold")
+        plt.suptitle("Pearson Correlation: Before vs After Feature Dropping", fontsize=13, fontweight="bold")
         plt.tight_layout()
-        heatmap_path = outdir / "correlation_heatmap.png"
-        plt.savefig(heatmap_path, dpi=150, bbox_inches="tight")
+        heatmap_path = figures_dir / "correlation_heatmap.png"
+        plt.savefig(heatmap_path, dpi=160, bbox_inches="tight")
         plt.close()
 
-    full_low_mask = y < args.high_threshold
-    X_low = X_full.loc[full_low_mask]
-    y_low = y.loc[full_low_mask]
+    test_low_mask = y_test_orig < args.high_threshold
+    X_low = X_test.loc[test_low_mask]
+    y_low = y_test_orig.loc[test_low_mask]
     X_high_train = X_train.loc[y_train_orig >= args.high_threshold]
 
     low_summary, low_feature_gaps = build_low_failure_report(
@@ -1072,73 +1211,122 @@ def main() -> None:
         X_high_train=X_high_train,
         high_threshold=args.high_threshold,
     )
-    low_summary_path = outdir / "low_zone_diagnostics.json"
+    low_summary_path = reports_dir / "low_zone_diagnostics.json"
     low_summary_path.write_text(json.dumps(low_summary, indent=2), encoding="utf-8")
-    low_gap_path = outdir / "low_zone_feature_gaps.csv"
+    low_gap_path = data_dir / "low_zone_feature_gaps.csv"
     gap_plot_path = None
     if not low_feature_gaps.empty:
         low_feature_gaps.to_csv(low_gap_path, index=False)
         print("\nTop feature gaps (low median vs high-train median):")
         print(low_feature_gaps.to_string(index=False))
 
-        plt.figure(figsize=(10, 8))
-        sorted_gaps = low_feature_gaps.sort_values("abs_gap", ascending=True)
+        sorted_gaps = low_feature_gaps.sort_values("abs_gap", ascending=True).reset_index(drop=True)
         y_pos = np.arange(len(sorted_gaps))
-
-        plt.barh(
-            y_pos - 0.2,
+        fig_gap, ax_gap = plt.subplots(figsize=(10, 8))
+        ax_gap.hlines(
+            y=y_pos,
+            xmin=sorted_gaps["high_train_median"],
+            xmax=sorted_gaps["low_median"],
+            color="#ADB5BD",
+            linewidth=2.0,
+        )
+        ax_gap.scatter(
             sorted_gaps["high_train_median"],
-            height=0.4,
-            align="center",
+            y_pos,
+            color="#2B8A3E",
+            edgecolor="black",
+            linewidth=0.3,
+            s=80,
             label="High Zone Median",
-            color="#4CAF50",
-            alpha=0.8,
-            edgecolor="black", linewidth=0.4
         )
-        plt.barh(
-            y_pos + 0.2,
+        ax_gap.scatter(
             sorted_gaps["low_median"],
-            height=0.4,
-            align="center",
+            y_pos,
+            color="#C92A2A",
+            edgecolor="black",
+            linewidth=0.3,
+            s=80,
             label="Low Zone Median",
-            color="#F44336",
-            alpha=0.8,
-            edgecolor="black", linewidth=0.4
         )
-
-        plt.yticks(y_pos, sorted_gaps["feature"])
-        plt.xlabel("Median Feature Value")
-        plt.ylabel("Feature")
-        plt.title("Feature Comparison: High vs. Low Performance Zones")
-        plt.legend()
-        plt.grid(axis="x", linestyle="--", alpha=0.6)
-
+        ax_gap.set_yticks(y_pos)
+        ax_gap.set_yticklabels(sorted_gaps["feature"])
+        ax_gap.set_xlabel("Median Feature Value")
+        ax_gap.set_ylabel("Feature")
+        ax_gap.set_title("Low-vs-High Feature Gap (Dumbbell View)")
+        ax_gap.legend(loc="lower right")
+        ax_gap.grid(axis="x", linestyle="--", alpha=0.4)
         plt.tight_layout()
-        gap_plot_path = outdir / "feature_gaps.png"
-        plt.savefig(gap_plot_path, dpi=160)
+        gap_plot_path = figures_dir / "feature_gaps.png"
+        plt.savefig(gap_plot_path, dpi=170, bbox_inches="tight")
         plt.close()
     else:
-        pd.DataFrame(columns=["feature", "high_train_median", "low_median", "abs_gap"]).to_csv(
-            low_gap_path, index=False
-        )
+        pd.DataFrame(columns=["feature", "high_train_median", "low_median", "abs_gap"]).to_csv(low_gap_path, index=False)
+
+    predictions_path = data_dir / "test_predictions.csv"
+    test_predictions.reset_index(drop=True).to_csv(predictions_path, index=False)
+    metrics_path = data_dir / "metrics_leaderboard.csv"
+    final_metrics.to_csv(metrics_path, index=False)
+    calibration_table_path = data_dir / "calibration_table.csv"
+    calibration.to_csv(calibration_table_path, index=False)
+    selected_features_path = data_dir / "selected_features.csv"
+    pd.DataFrame({"feature": selected_columns}).to_csv(selected_features_path, index=False)
+
+    best_params_path = reports_dir / "best_params.json"
+    best_params_path.write_text(json.dumps(best_params_report, indent=2, default=str), encoding="utf-8")
+    split_summary = {
+        "train_rows": int(X_train.shape[0]),
+        "test_rows": int(X_test.shape[0]),
+        "train_high_rows": int((y_train_orig >= args.high_threshold).sum()),
+        "train_low_rows": int((y_train_orig < args.high_threshold).sum()),
+        "test_high_rows": int((y_test_orig >= args.high_threshold).sum()),
+        "test_low_rows": int((y_test_orig < args.high_threshold).sum()),
+        "high_threshold": float(args.high_threshold),
+    }
+    split_summary_path = reports_dir / "split_summary.json"
+    split_summary_path.write_text(json.dumps(split_summary, indent=2), encoding="utf-8")
+
+    vif_table = feature_selection_report.get("vif_table", pd.DataFrame())
+    vif_table_path = None
+    if not vif_table.empty:
+        vif_table_path = data_dir / "vif_table.csv"
+        vif_table.to_csv(vif_table_path, index=False)
 
     artifacts = {
-        "dashboard": str(dashboard_path),
-        "low_zone_diagnostics": str(low_summary_path),
-        "low_zone_feature_gaps": str(low_gap_path),
+        "figures": {
+            "performance_dashboard": str(dashboard_path),
+            "calibration_curve": str(calibration_path),
+        },
+        "data": {
+            "metrics_leaderboard": str(metrics_path),
+            "test_predictions": str(predictions_path),
+            "selected_features": str(selected_features_path),
+            "calibration_table": str(calibration_table_path),
+            "low_zone_feature_gaps": str(low_gap_path),
+        },
+        "reports": {
+            "low_zone_diagnostics": str(low_summary_path),
+            "best_params": str(best_params_path),
+            "split_summary": str(split_summary_path),
+        },
     }
     if heatmap_path:
-        artifacts["correlation_heatmap"] = str(heatmap_path)
+        artifacts["figures"]["correlation_heatmap"] = str(heatmap_path)
     if gap_plot_path:
-        artifacts["feature_gaps"] = str(gap_plot_path)
+        artifacts["figures"]["feature_gaps"] = str(gap_plot_path)
+    if vif_table_path:
+        artifacts["data"]["vif_table"] = str(vif_table_path)
 
     report = {
         "input_file": str(input_path),
         "target": target_col,
         "high_threshold": args.high_threshold,
         "rows_total": int(df.shape[0]),
+        "rows_train": int(X_train.shape[0]),
+        "rows_test": int(X_test.shape[0]),
         "high_rows": int((y >= args.high_threshold).sum()),
-        "low_rows": int(len(X_low)),
+        "low_rows": int((y < args.high_threshold).sum()),
+        "high_rows_test": int((y_test_orig >= args.high_threshold).sum()),
+        "low_rows_test": int((y_test_orig < args.high_threshold).sum()),
         "features_raw": int(X_raw.shape[1]),
         "features_final": int(X_train.shape[1]),
         "winner": winner,
@@ -1151,20 +1339,16 @@ def main() -> None:
         "moe_report": moe_report,
         "metrics": final_metrics.to_dict(orient="records"),
         "low_zone_diagnostics": low_summary,
-        "best_params": best_params_report,
         "artifacts": artifacts,
     }
 
-    report_path = outdir / "model_report.json"
+    report_path = reports_dir / "model_report.json"
     report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-    vif_table = feature_selection_report.get("vif_table", pd.DataFrame())
-    if not vif_table.empty:
-        vif_table.to_csv(outdir / "vif_table.csv", index=False)
 
     print(f"\nSaved report: {report_path}")
     print(f"Saved dashboard: {dashboard_path}")
-    if heatmap_path:
-        print(f"Saved heatmap: {heatmap_path}")
+    print(f"Saved predictions table: {predictions_path}")
+    print(f"Saved metrics table: {metrics_path}")
 
 
 if __name__ == "__main__":

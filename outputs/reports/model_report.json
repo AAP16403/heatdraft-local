@@ -1,0 +1,293 @@
+{
+  "input_file": "F:\\heatdraft local\\Nature paper.xlsx",
+  "target": "Removal rate (%)",
+  "high_threshold": 90.0,
+  "rows_total": 1501,
+  "rows_train": 1200,
+  "rows_test": 301,
+  "high_rows": 760,
+  "low_rows": 741,
+  "high_rows_test": 152,
+  "low_rows_test": 149,
+  "features_raw": 53,
+  "features_final": 20,
+  "winner": "stacking_top3",
+  "masking_report": {},
+  "categorical_filter": {
+    "dropped_columns": [
+      "Name of MB",
+      "Types of contaminants",
+      "CAS",
+      "SMILES"
+    ],
+    "details": [
+      {
+        "column": "Name of MB",
+        "n_unique_train": 44,
+        "unique_ratio_train": 0.0367,
+        "id_like": true
+      },
+      {
+        "column": "Types of contaminants",
+        "n_unique_train": 172,
+        "unique_ratio_train": 0.1433,
+        "id_like": false
+      },
+      {
+        "column": "CAS",
+        "n_unique_train": 171,
+        "unique_ratio_train": 0.1425,
+        "id_like": false
+      },
+      {
+        "column": "SMILES",
+        "n_unique_train": 187,
+        "unique_ratio_train": 0.1558,
+        "id_like": true
+      }
+    ]
+  },
+  "feature_selection": {
+    "steps": {
+      "sparsity": {
+        "dropped": [],
+        "remaining": 49
+      },
+      "near_zero_variance": {
+        "dropped": [],
+        "remaining": 49
+      },
+      "correlation": {
+        "original_features": 49,
+        "clusters": [
+          {
+            "kept": "RD_MW",
+            "dropped": [
+              "Compound Mw (g/mol)",
+              "Compound stokes radius rs (nm)"
+            ],
+            "size": 3
+          },
+          {
+            "kept": "Compound size (nm)",
+            "dropped": [
+              "Max projection (\u00c5)"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "Compound log K ow",
+            "dropped": [
+              "RD_LogP"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "log D (pH=5.5)",
+            "dropped": [
+              "log D (pH=7.4)"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "MinPartialCharge",
+            "dropped": [
+              "MaxPartialCharge"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "MB pore radius rp (nm)",
+            "dropped": [
+              "MB MWCO (Da)"
+            ],
+            "size": 2
+          },
+          {
+            "kept": "MB surface charge density , \u03c3m (mC\u00b7m-2)",
+            "dropped": [
+              "MB zeta potential (mV)"
+            ],
+            "size": 2
+          }
+        ],
+        "dropped": [
+          "Compound Mw (g/mol)",
+          "Compound charge",
+          "Compound size (nm)",
+          "Compound stokes radius rs (nm)",
+          "MB MWCO (Da)",
+          "MB zeta potential (mV)",
+          "Max projection (\u00c5)",
+          "MaxPartialCharge",
+          "Min projection (\u00c5)",
+          "RD_HBA",
+          "RD_LogP",
+          "log D (pH=7.4)",
+          "\u03a6S"
+        ],
+        "kept": [
+          "A",
+          "B",
+          "Compound log K ow",
+          "Density (g\u00b7cm-3)",
+          "Diffusion coefficient (cm2\u00b7s-1)",
+          "E",
+          "Initial concentration of compound (mg/L)",
+          "MB contact angle (\u00b0)",
+          "MB pore radius rp (nm)",
+          "MB surface charge density , \u03c3m (mC\u00b7m-2)",
+          "MB surface energy, \u03b3m (J\u00b7m-2)",
+          "MB volume charge density, \u03b4m (mol\u00b7m-3)",
+          "Measurement time (min)",
+          "MinPartialCharge",
+          "Pressure (kPa)",
+          "RD_FracCSP3",
+          "RD_HBD",
+          "RD_MW",
+          "RD_Rings",
+          "RD_RotBonds",
+          "RD_TPSA",
+          "RMS roughness (nm)",
+          "Reference",
+          "S",
+          "Surface tension \u03b3s (dyne\u00b7cm-1)",
+          "Total charge",
+          "Type of MB",
+          "V",
+          "WS (mg/L)",
+          "log D (pH=5.5)",
+          "pH",
+          "pKa1",
+          "pKa2",
+          "rs/rp",
+          "\u03a6D",
+          "\u2206Gs-m (J\u00b7m-2)"
+        ],
+        "final_features": 36,
+        "n_dropped": 13
+      },
+      "vif": {
+        "dropped": [
+          "V",
+          "rs/rp",
+          "RD_MW",
+          "MB surface energy, \u03b3m (J\u00b7m-2)",
+          "MB volume charge density, \u03b4m (mol\u00b7m-3)",
+          "E",
+          "RD_TPSA",
+          "S",
+          "pH",
+          "B",
+          "Density (g\u00b7cm-3)",
+          "Surface tension \u03b3s (dyne\u00b7cm-1)",
+          "pKa2",
+          "MB pore radius rp (nm)",
+          "MB contact angle (\u00b0)",
+          "RD_HBD"
+        ],
+        "remaining": 20
+      }
+    },
+    "n_start": 49,
+    "n_final": 20,
+    "total_dropped": 29
+  },
+  "moe_report": {
+    "enabled": true,
+    "n_clusters": 2,
+    "gate_numeric_features": 18,
+    "cluster_rows": {
+      "cluster_0": 1073,
+      "cluster_1": 127
+    },
+    "experts_trained": [
+      0,
+      1
+    ]
+  },
+  "metrics": [
+    {
+      "model": "stacking_top3",
+      "rmse_high": 1.8267529186180298,
+      "mae_high": 1.2264760995103092,
+      "r2_high": 0.615461868547134,
+      "high_hit_rate": 0.9802631578947368,
+      "r2_global": 0.38230751302740207,
+      "rmse_global": 22.51173274209577
+    },
+    {
+      "model": "moe_kmeans2",
+      "rmse_high": 1.931825414497601,
+      "mae_high": 1.278006431002245,
+      "r2_high": 0.5699533763767004,
+      "high_hit_rate": 0.9736842105263158,
+      "r2_global": 0.30747891400732097,
+      "rmse_global": 23.836323196926084
+    },
+    {
+      "model": "hist_gb",
+      "rmse_high": 1.9708314742782813,
+      "mae_high": 1.2393237258720584,
+      "r2_high": 0.552411653537755,
+      "high_hit_rate": 0.9868421052631579,
+      "r2_global": 0.10409745406212867,
+      "rmse_global": 27.11147525289578
+    },
+    {
+      "model": "random_forest",
+      "rmse_high": 2.0374857819306436,
+      "mae_high": 1.3764526972704048,
+      "r2_high": 0.521624459988802,
+      "high_hit_rate": 0.9671052631578947,
+      "r2_global": 0.48255555983011766,
+      "rmse_global": 20.60414640497733
+    },
+    {
+      "model": "xgboost",
+      "rmse_high": 2.415300236835414,
+      "mae_high": 1.2990632711660475,
+      "r2_high": 0.32776357682042434,
+      "high_hit_rate": 0.9868421052631579,
+      "r2_global": 0.2740486866075096,
+      "rmse_global": 24.4048707727181
+    },
+    {
+      "model": "extra_trees",
+      "rmse_high": 4.919240190649821,
+      "mae_high": 1.8505320087914963,
+      "r2_high": -1.7885333855093517,
+      "high_hit_rate": 0.9473684210526315,
+      "r2_global": 0.5685712768393216,
+      "rmse_global": 18.813833338780707
+    }
+  ],
+  "low_zone_diagnostics": {
+    "low_rows": 149,
+    "false_high_rate": 0.4228187919463087,
+    "mean_overprediction": 23.995825352159034,
+    "low_rmse": 31.943005393332534,
+    "low_mae": 24.575451738262434
+  },
+  "artifacts": {
+    "figures": {
+      "performance_dashboard": "outputs\\figures\\performance_dashboard.png",
+      "calibration_curve": "outputs\\figures\\calibration_curve.png",
+      "correlation_heatmap": "outputs\\figures\\correlation_heatmap.png",
+      "feature_gaps": "outputs\\figures\\feature_gaps.png"
+    },
+    "data": {
+      "metrics_leaderboard": "outputs\\data\\metrics_leaderboard.csv",
+      "test_predictions": "outputs\\data\\test_predictions.csv",
+      "selected_features": "outputs\\data\\selected_features.csv",
+      "calibration_table": "outputs\\data\\calibration_table.csv",
+      "low_zone_feature_gaps": "outputs\\data\\low_zone_feature_gaps.csv",
+      "vif_table": "outputs\\data\\vif_table.csv"
+    },
+    "reports": {
+      "low_zone_diagnostics": "outputs\\reports\\low_zone_diagnostics.json",
+      "best_params": "outputs\\reports\\best_params.json",
+      "split_summary": "outputs\\reports\\split_summary.json"
+    }
+  }
+}

@@ -4,100 +4,93 @@
     <title>HeatDraft ML Pipeline Flowchart</title>
     <script type="module">
       import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-      mermaid.initialize({ startOnLoad: true, theme: 'default' });
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: 'neutral',
+        securityLevel: 'loose',
+        flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' }
+      });
     </script>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8f9fa; padding: 20px; text-align: center; }
-        h2 { color: #333; }
-        .mermaid { margin: 0 auto; display: flex; justify-content: center; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f5f7fa; padding: 18px; text-align: center; }
+        h2 { color: #1f2937; margin-bottom: 12px; }
+        .mermaid { margin: 0 auto; display: flex; justify-content: center; background: #ffffff; border: 1px solid #d1d5db; border-radius: 12px; padding: 12px; }
+        .note { color: #4b5563; font-size: 13px; margin-top: 8px; }
     </style>
 </head>
 <body>
-    <h2>HeatDraft ML Pipeline Architecture</h2>
+    <h2>HeatDraft ML Pipeline Architecture (Current)</h2>
     <div class="mermaid">
-    graph TD
-        %% Core Data Loading
-        Input("Raw Data:\n.csv / .xlsx") --> Load["Load Dataframe\nNormalize Column Names\nFallback headers if needed"]
-        Load --> SMILES{"Contains 'SMILES' ?"}
-        
-        %% Cheminformatics
-        SMILES -- Yes --> RDKit["RDKit Cheminformatics Engine\nGenerate 8 Physical Descriptors:\nMW, LogP, TPSA, HBD, HBA, Rings..."]
-        SMILES -- No --> Clean["Initial Cleansing"]
-        RDKit --> Clean
-        
-        %% Initial Cleaning
-        Clean --> RowDrop["Drop rows missing Target Value\nDrop Data-Leakage columns 'Unnamed: 0'"]
-        
-        %% Data Splitting
-        RowDrop --> Split["Stratified Train/Test Split\n80% Train | 20% Test\nPreserves 'High Performance' ratios"]
-        
-        %% Drop Out High Cardinality
-        Split --> CatDrop["Categorical Culling:\nDrop text vars with >60 unique values\nDrop variables with >95% uniqueness\nPrevents UUID Memorization"]
-        
-        %% Strict Multicollinearity Protocol
-        CatDrop --> FeatureSelection["Feature Selection Protocol\n(Executing on Train Set Only)"]
-        
-        subgraph Mathematical Feature Culling
-        FeatureSelection --> Sparsity["Drop Sparse Features >95% missing"]
-        Sparsity --> NZV["Drop Near-Zero Variance Numbers"]
-        NZV --> Pearson["Pearson Correlation Clustering > 0.92"]
-        Pearson --> MI["Mutual Information Tie-Breaker:\nKeep mathematically best feature\nin identical clusters, drop rest"]
-        MI --> VIF["Variance Inflation Factor Recursion:\nRecursively drop worst feature\nuntil matrix VIF < 10.0"]
+    flowchart TD
+        In["Input file (.csv / .xlsx)"] --> Load["load_dataframe<br/>normalize_col_name"]
+        Load --> Smiles{"SMILES column present?"}
+        Smiles -- Yes --> RDKit["add_rdkit_descriptors<br/>8 RDKit molecular features"]
+        Smiles -- No --> RawPrep["Continue without RDKit"]
+        RDKit --> RawPrep
+        RawPrep --> Mask["Optional: apply_target_mask"]
+        Mask --> TargetNum["Target to numeric + drop NaN target rows"]
+        TargetNum --> LeakDrop["Drop leakage-like cols:<br/>number, index, unnamed: 0"]
+
+        LeakDrop --> ClassGate{"At least 2 high and 2 low rows?"}
+        ClassGate -- No --> FailSplit["RuntimeError: invalid class balance"]
+        ClassGate -- Yes --> Split["Train/Test split<br/>stratify if enough high rows"]
+
+        Split --> CatDrop["Drop high-cardinality / ID-like categoricals<br/>(fit on train, apply to train/test/full)"]
+        CatDrop --> FSDecision{"Feature drop enabled?"}
+
+        FSDecision -- Yes --> FSStart["full_feature_selection (train only)"]
+        FSStart --> Sparse["Sparsity filter"]
+        Sparse --> NZV["Near-zero variance filter"]
+        NZV --> Corr["Correlation clustering + MI representative"]
+        Corr --> VIF["Recursive VIF pruning"]
+        VIF --> Selected["Selected feature columns"]
+
+        FSDecision -- No --> LightKeep["Keep columns with train non-null >= 5%"]
+        LightKeep --> Selected
+
+        Selected --> Align["Apply selected columns to<br/>X_train / X_test / X_full"]
+        Align --> Integrity["validate_pipeline_integrity<br/>column order + index alignment + no overlap"]
+
+        Integrity --> TransformGuard["target_transform guards:<br/>no NaN and target in [0, 100]"]
+        TransformGuard --> Trans["y_train_trans + high_threshold_trans"]
+        Trans --> Weight["Dynamic high-zone sample weighting"]
+        Weight --> HighGate{"Any high-zone rows in test?"}
+        HighGate -- No --> FailHigh["RuntimeError: no high-zone test rows"]
+        HighGate -- Yes --> Tune["Optuna CV tuning<br/>xgboost / extra_trees / random_forest / hist_gb"]
+
+        Tune --> Stack["StackingRegressor (top 3 base models)"]
+        Stack --> MoE{"MoE enabled?"}
+        MoE -- Yes --> MoETrain["KMeans MoE<br/>PCA gate + cluster experts"]
+        MoE -- No --> Leader["Final leaderboard + winner select"]
+        MoETrain --> Leader
+
+        Leader --> Predict["Predict on test<br/>inverse logit to 0-100"]
+        Predict --> Viz["Build visuals:<br/>performance dashboard<br/>calibration curve<br/>correlation heatmap (optional)<br/>feature gaps (optional)"]
+
+        Viz --> LowGate{"Any low-zone rows in test?"}
+        LowGate -- No --> FailLow["RuntimeError: no low-zone rows for diagnostics"]
+        LowGate -- Yes --> LowDiag["Low-zone diagnostics + feature gap table"]
+
+        LowDiag --> Store["Write structured artifacts under outdir"]
+
+        subgraph Storage Layout
+        Store --> Figs["figures/<br/>performance_dashboard.png<br/>calibration_curve.png<br/>correlation_heatmap.png*<br/>feature_gaps.png*"]
+        Store --> Data["data/<br/>test_predictions.csv<br/>metrics_leaderboard.csv<br/>calibration_table.csv<br/>selected_features.csv<br/>low_zone_feature_gaps.csv<br/>vif_table.csv*"]
+        Store --> Reports["reports/<br/>model_report.json<br/>best_params.json<br/>split_summary.json<br/>low_zone_diagnostics.json"]
         end
-        
-        %% Target Adjustments
-        VIF --> TargetTransform["Logit Target Bound Transformation:\nForce limits to 0.0 - 1.0 probability\n'log(p / (1-p))'"]
-        TargetTransform --> Impute["Median Imputation & Robust Scaling"]
-        
-        %% Training Configuration
-        Impute --> Tuning["Bayesian Hyperparameter Engine\n(Optuna - 5-Fold Cross Validation)"]
-        
-        subgraph Intelligent AI Tuning
-        Tuning --> XGB["XGBoost base modeling"]
-        Tuning --> Extra["ExtraTrees base modeling"]
-        Tuning --> RF["Random Forest base modeling"]
-        Tuning --> Hist["HistGradientBoosting modeling"]
-        
-        XGB -.-> DynamicWeights
-        Extra -.-> DynamicWeights
-        RF -.-> DynamicWeights
-        Hist -.-> DynamicWeights
-        end
-        
-        %% Penalties
-        DynamicWeights(("Dynamic High-Zone Weighting:\nHeavily penalize the AI\nif it hallucinates >90% successes"))
-        
-        %% Final Ensemble Assembly
-        DynamicWeights --> Top3["Extract Top 3 Best Base Architectures"]
-        Top3 --> Ensemble["Stacking Regressor Assembly:\nFuse optimal predictions into\nRidgeCV Meta-Model"]
-        
-        %% Mixture of Experts
-        Ensemble --> MoE{"Mixture of Experts\nEnabled?"}
-        MoE -- Yes --> PCA["Principal Component Dimensionality Reduction"]
-        PCA --> KMeans["K-Means Clustering\nIdentify 2 unique chemical physics zones"]
-        KMeans --> Expert1["Train Full Ensemble\nClone strictly on Zone 1"]
-        KMeans --> Expert2["Train Full Ensemble\nClone strictly on Zone 2"]
-        
-        %% Execution and Output
-        Expert1 --> Output
-        Expert2 --> Output
-        MoE -- No --> Output
-        
-        Output["Generate Analytics:\nInverse-Transform Logits back to 0-100%"]
-        Output --> Dash["Generate Dashboard PNG\nWrite JSON Model Artifacts\nBuild Correlation Heatmaps"]
-        Dash --> LowFail["Diagnose Low Performance <90%\nCalculate Gap Medians"]
-        LowFail --> Save[/"Saved in outputs/ directory"/]
-        
-        %% Styles
-        classDef primary fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#0b3c5d
-        classDef danger fill:#ffebee,stroke:#e53935,stroke-width:2px,color:#b71c1c
-        classDef success fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#1b5e20
-        classDef ML fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#e65100
-        
-        class Load,SMILES,Clean,RowDrop,Split primary
-        class Sparsity,NZV,Pearson,MI,VIF,CatDrop danger
-        class TargetTransform,DynamicWeights success
-        class Tuning,XGB,Extra,RF,Hist,Top3,Ensemble,MoE,PCA,KMeans,Expert1,Expert2 ML
+
+        classDef source fill:#e3f2fd,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+        classDef prep fill:#ecfeff,stroke:#0f766e,stroke-width:2px,color:#083344
+        classDef model fill:#fff7ed,stroke:#c2410c,stroke-width:2px,color:#7c2d12
+        classDef gate fill:#fef2f2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+        classDef store fill:#f5f3ff,stroke:#6d28d9,stroke-width:2px,color:#4c1d95
+
+        class In,Load,Smiles,RDKit,RawPrep,Mask,TargetNum,LeakDrop,Split source
+        class CatDrop,FSDecision,FSStart,Sparse,NZV,Corr,VIF,Selected,Align,Integrity,TransformGuard,Trans,Weight prep
+        class Tune,Stack,MoE,MoETrain,Leader,Predict,Viz,LowDiag model
+        class ClassGate,HighGate,LowGate,FailSplit,FailHigh,FailLow gate
+        class Store,Figs,Data,Reports store
     </div>
+    <p class="note">* Optional outputs depend on feature-drop settings and data availability.</p>
 </body>
 </html>

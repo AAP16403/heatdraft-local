@@ -1,0 +1,13 @@
+feature,high_train_median,low_median,abs_gap
+WS (mg/L),610.0,2685.0,2075.0
+Pressure (kPa),725.0,552.0,173.0
+RMS roughness (nm),60.2,9.0,51.2
+Measurement time (min),30.0,10.0,20.0
+pKa1,5.41,7.84,2.4299999999999997
+RD_RotBonds,3.0,2.0,1.0
+log D (pH=5.5),1.1,0.56,0.54
+Initial concentration of compound (mg/L),0.8,0.3,0.5
+Compound log K ow,1.781,1.41,0.371
+RD_FracCSP3,0.46153846153846156,0.375,0.08653846153846156
+∆Gs-m (J·m-2),-1.00585489089343,-0.93049579142346,0.07535909946996999
+MinPartialCharge,-0.39872771709730903,-0.399630243557307,0.0009025264599979432
