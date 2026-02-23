@@ -1,0 +1,9 @@
+{
+  "train_rows": 48,
+  "test_rows": 12,
+  "train_high_rows": 19,
+  "train_low_rows": 29,
+  "test_high_rows": 4,
+  "test_low_rows": 8,
+  "high_threshold": 90
+}

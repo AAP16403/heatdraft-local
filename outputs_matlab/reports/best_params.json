@@ -1,0 +1,31 @@
+{
+  "LSBoost": {
+    "NumLearningCycles": 617,
+    "LearnRate": 0.061862234866706223,
+    "MinLeafSize": 2,
+    "MaxNumSplits": 36
+  },
+  "BaggedTrees_mtryWide": {
+    "NumLearningCycles": 1384,
+    "MinLeafSize": 1,
+    "NumVariablesToSample": 19
+  },
+  "NeuralNet": {
+    "Layer1": 107,
+    "Layer2": 62,
+    "Lambda": 0.096236560595450965,
+    "IterationLimit": 814,
+    "Activation": "relu"
+  },
+  "stacking_top3": [
+    {
+      "top3": "BaggedTrees_mtryWide"
+    },
+    {
+      "top3": "LSBoost"
+    },
+    {
+      "top3": "NeuralNet"
+    }
+  ]
+}

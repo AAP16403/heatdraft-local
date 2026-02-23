@@ -1,0 +1,226 @@
+{
+  "input_source": "F:\\heatdraft local\\Nature paper.xlsx",
+  "target": "RemovalRate___",
+  "high_threshold": 90,
+  "rows_total": 1501,
+  "rows_train": 1201,
+  "rows_test": 300,
+  "high_rows_total": 760,
+  "low_rows_total": 741,
+  "features_raw": 46,
+  "features_final_matrix": 64,
+  "winner": "stacking_top3",
+  "masked_target_rows": 0,
+  "train_rows_used_for_model": 1201,
+  "categorical_filter": {
+    "dropped_columns": [
+      "NameOfMB",
+      "TypesOfContaminants",
+      "CAS",
+      "SMILES"
+    ],
+    "details": [
+      {
+        "column": "NameOfMB",
+        "n_unique_train": 44,
+        "unique_ratio_train": 0.036636136552872609,
+        "id_like": true
+      },
+      {
+        "column": "TypesOfContaminants",
+        "n_unique_train": 168,
+        "unique_ratio_train": 0.1398834304746045,
+        "id_like": false
+      },
+      {
+        "column": "CAS",
+        "n_unique_train": 168,
+        "unique_ratio_train": 0.1398834304746045,
+        "id_like": false
+      },
+      {
+        "column": "SMILES",
+        "n_unique_train": 184,
+        "unique_ratio_train": 0.15320566194837634,
+        "id_like": true
+      }
+    ]
+  },
+  "feature_selection": {
+    "enabled": true,
+    "n_start_numeric": 38,
+    "n_final_numeric": 26,
+    "total_dropped_numeric": 12,
+    "sparsity_dropped": [],
+    "nzv_dropped": [],
+    "correlation_dropped": [
+      "CompoundMw_g_mol_",
+      "logD_pH_7_4_",
+      "MinPartialCharge",
+      "MaxProjection___",
+      "MBMWCO_Da_",
+      "MBSurfaceChargeDensity__m_mC_m_2_"
+    ],
+    "vif_dropped": [
+      "rs_rp",
+      "V",
+      "MBVolumeChargeDensity__m_mol_m_3_",
+      "CompoundStokesRadiusRs_nm_",
+      "TotalCharge",
+      "CompoundSize_nm_"
+    ]
+  },
+  "moe_report": {
+    "enabled": false,
+    "reason": "At least one cluster fell below minimum cluster rows.",
+    "cluster_rows": [
+      1177,
+      24
+    ]
+  },
+  "metrics": [
+    {
+      "Model": "stacking_top3",
+      "RMSE_Global": 18.996611889212154,
+      "MAE_Global": 11.277028167141685,
+      "R2_Global": 0.58047392184970148,
+      "RMSE_Train": 13.94548712954858,
+      "MAE_Train": 8.3631435197199266,
+      "R2_Train": 0.71725579296854258,
+      "RMSE_High": 2.8447319712382555,
+      "MAE_High": 1.7907953179497058,
+      "R2_High": 0.021631744638544448,
+      "RMSE_High_Train": 1.1853602066611013,
+      "MAE_High_Train": 0.80084685402799594,
+      "R2_High_Train": 0.8301745737937507,
+      "HighHitRate": 0.98026315789473684,
+      "N_Test": 300,
+      "N_TestHigh": 152
+    },
+    {
+      "Model": "BaggedTrees_mtryWide",
+      "RMSE_Global": 23.390849260989562,
+      "MAE_Global": 13.829304776951837,
+      "R2_Global": 0.36393918308947637,
+      "RMSE_Train": 19.182564749578173,
+      "MAE_Train": 10.781345465890196,
+      "R2_Train": 0.46501736815852979,
+      "RMSE_High": 2.9246548197227011,
+      "MAE_High": 1.6890545294286679,
+      "R2_High": -0.034115095462042611,
+      "RMSE_High_Train": 1.3171839436900081,
+      "MAE_High_Train": 0.71760630964394456,
+      "R2_High_Train": 0.79030171329343357,
+      "HighHitRate": 0.96052631578947367,
+      "N_Test": 300,
+      "N_TestHigh": 152
+    },
+    {
+      "Model": "LSBoost",
+      "RMSE_Global": 12.656449877996149,
+      "MAE_Global": 6.7125002967101821,
+      "R2_Global": 0.81377822176039438,
+      "RMSE_Train": 1.9867296926221092,
+      "MAE_Train": 0.96108408729968542,
+      "R2_Train": 0.99426142710845478,
+      "RMSE_High": 4.70318004646976,
+      "MAE_High": 2.1534746442066388,
+      "R2_High": -1.6742552360490408,
+      "RMSE_High_Train": 0.16951776120043108,
+      "MAE_High_Train": 0.096718966133426773,
+      "R2_High_Train": 0.99652677880852836,
+      "HighHitRate": 0.881578947368421,
+      "N_Test": 300,
+      "N_TestHigh": 152
+    },
+    {
+      "Model": "NeuralNet",
+      "RMSE_Global": 16.851148185216687,
+      "MAE_Global": 9.99197316281984,
+      "R2_Global": 0.6698846966279971,
+      "RMSE_Train": 13.534018938841742,
+      "MAE_Train": 7.7159011398693247,
+      "R2_Train": 0.7336946465182419,
+      "RMSE_High": 6.2259451882384171,
+      "MAE_High": 2.8077388997897095,
+      "R2_High": -3.6863015563582158,
+      "RMSE_High_Train": 1.6182837142317392,
+      "MAE_High_Train": 0.91416560506454414,
+      "R2_High_Train": 0.68347256882746854,
+      "HighHitRate": 0.91447368421052633,
+      "N_Test": 300,
+      "N_TestHigh": 152
+    }
+  ],
+  "cluster_analysis": {
+    "k": 2,
+    "high_cluster_id": 2,
+    "train_cluster_mean_target": [
+      77.968487425658452,
+      78.605458333333331
+    ],
+    "test_cluster_counts": [
+      296,
+      4
+    ],
+    "per_cluster_test_metrics": [
+      {
+        "Cluster": 1,
+        "N_Test": 296,
+        "MeanTarget_Test": 75.122431081081075,
+        "R2_Test": 0.57841783331601482,
+        "RMSE_Test": 19.112509254531652,
+        "MAE_Test": 11.386230123519924,
+        "IsHighPerformanceCluster": false
+      },
+      {
+        "Cluster": 2,
+        "N_Test": 4,
+        "MeanTarget_Test": 94.399999999999991,
+        "R2_Test": -0.185990760217994,
+        "RMSE_Test": 5.83369564379694,
+        "MAE_Test": 3.1960833951520655,
+        "IsHighPerformanceCluster": true
+      }
+    ]
+  },
+  "high_performance_cluster_test": {
+    "cluster_id": 2,
+    "n_test": 4,
+    "mean_target_test": 94.399999999999991,
+    "r2_test": -0.185990760217994,
+    "rmse_test": 5.83369564379694,
+    "mae_test": 3.1960833951520655,
+    "train_mean_target": 78.605458333333331
+  },
+  "low_zone_diagnostics": {
+    "low_rows": 148,
+    "false_high_rate": 0.21621621621621623,
+    "mean_overprediction": 20.559318642587289,
+    "low_rmse": 26.892091546034298,
+    "low_mae": 21.019645687933451
+  },
+  "artifacts": {
+    "figures": {
+      "performance_dashboard": "outputs_matlab\\figures\\performance_dashboard.png",
+      "model_frontier": "outputs_matlab\\figures\\model_frontier.png",
+      "calibration_curve": "outputs_matlab\\figures\\calibration_curve.png",
+      "cluster_detail": "outputs_matlab\\figures\\cluster_detail.png",
+      "feature_correlation_heatmap": "outputs_matlab\\figures\\feature_correlation_heatmap.png",
+      "feature_importance_curve": "outputs_matlab\\figures\\feature_importance_curve.png"
+    },
+    "data": {
+      "metrics_leaderboard": "outputs_matlab\\data\\metrics_leaderboard.csv",
+      "test_predictions": "outputs_matlab\\data\\test_predictions.csv",
+      "selected_features": "outputs_matlab\\data\\selected_features.csv",
+      "calibration_table": "outputs_matlab\\data\\calibration_table.csv",
+      "low_zone_feature_gaps": "outputs_matlab\\data\\low_zone_feature_gaps.csv",
+      "cluster_performance": "outputs_matlab\\data\\cluster_performance.csv"
+    },
+    "reports": {
+      "low_zone_diagnostics": "outputs_matlab\\reports\\low_zone_diagnostics.json",
+      "best_params": "outputs_matlab\\reports\\best_params.json",
+      "split_summary": "outputs_matlab\\reports\\split_summary.json"
+    }
+  }
+}

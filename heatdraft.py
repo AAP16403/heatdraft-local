@@ -1,5 +1,6 @@
 ﻿import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
@@ -31,11 +32,30 @@ if sys.platform.startswith("win") and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 
+DEFAULT_TARGET_ALIASES = [
+    "Removal rate (%)",
+    "RemovalRate___",
+    "RemovalRate",
+    "Removal_rate___",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Robust local ML pipeline for HeatDraft data.")
     parser.add_argument("input_file", nargs="?", help="Path to input .csv/.xlsx")
-    parser.add_argument("--target", default="Removal rate (%)", help="Target column name")
-    parser.add_argument("--header", type=int, default=1, help="Header row index (0-indexed)")
+    parser.add_argument("--target", default="Removal rate (%)", help="Primary target column name")
+    parser.add_argument(
+        "--target-aliases",
+        nargs="*",
+        default=[],
+        help="Optional extra target aliases to resolve the target column robustly.",
+    )
+    parser.add_argument(
+        "--header",
+        type=int,
+        default=-1,
+        help="Header row index (0-indexed). Use -1 to auto-search common rows [0..3].",
+    )
     parser.add_argument("--trials", type=int, default=90, help="Total Optuna trials across models")
     parser.add_argument("--test-size", type=float, default=0.2, help="Holdout fraction")
     parser.add_argument(
@@ -67,9 +87,94 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable KMeans-gated Mixture-of-Experts stage",
     )
+    parser.add_argument(
+        "--disable-inverse",
+        action="store_true",
+        help="Disable inverse-design stage (target removal -> suggested filter properties).",
+    )
+    parser.add_argument(
+        "--inverse-targets",
+        nargs="+",
+        type=float,
+        default=[90.0, 95.0, 98.0],
+        help="Target removal rates for inverse design recommendations.",
+    )
+    parser.add_argument(
+        "--inverse-samples",
+        type=int,
+        default=12000,
+        help="Number of candidate designs sampled for inverse search.",
+    )
+    parser.add_argument(
+        "--inverse-topk",
+        type=int,
+        default=12,
+        help="Top recommendations saved per target removal rate.",
+    )
+    parser.add_argument(
+        "--inverse-pollutant-col",
+        default="TypesOfContaminants",
+        help="Feature column used as pollutant condition for inverse design.",
+    )
+    parser.add_argument(
+        "--inverse-pollutants",
+        nargs="+",
+        default=[],
+        help="Pollutant values to condition inverse design on. If omitted, most frequent seen in train are used.",
+    )
+    parser.add_argument(
+        "--inverse-pollutants-file",
+        default="",
+        help="Optional path (.txt/.csv/.json) with pollutant values (combined with --inverse-pollutants).",
+    )
+    parser.add_argument(
+        "--inverse-controllable-cols",
+        nargs="+",
+        default=[],
+        help="Optional explicit list of controllable filter-property columns for inverse design.",
+    )
+    parser.add_argument(
+        "--inverse-confidence",
+        type=float,
+        default=0.80,
+        help="Confidence level for suggested parameter ranges (e.g., 0.80 gives 10th-90th percentiles).",
+    )
     parser.add_argument("--target-mask-range", nargs=2, type=float, help="Mask target values in [low, high] (replace with NaN)")
     parser.add_argument("--dry-run", action="store_true", help="Run data prep only and print sanity checks, then exit")
     return parser.parse_args()
+
+
+def validate_and_normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    if args.header < -1:
+        raise RuntimeError("--header must be -1 (auto) or >= 0.")
+    if not (0.0 < float(args.test_size) < 1.0):
+        raise RuntimeError("--test-size must be between 0 and 1.")
+    if int(args.trials) < 1:
+        raise RuntimeError("--trials must be >= 1.")
+    if int(args.seed) < 0:
+        raise RuntimeError("--seed must be >= 0.")
+    if args.target_mask_range:
+        lo, hi = float(args.target_mask_range[0]), float(args.target_mask_range[1])
+        if lo > hi:
+            raise RuntimeError("--target-mask-range must satisfy low <= high.")
+        if lo < 0.0 or hi > 100.0:
+            raise RuntimeError("--target-mask-range must stay within [0, 100].")
+    if float(args.high_threshold) < 0.0 or float(args.high_threshold) > 100.0:
+        raise RuntimeError("--high-threshold must be within [0, 100].")
+    if int(args.inverse_samples) < 100:
+        raise RuntimeError("--inverse-samples must be >= 100.")
+    if int(args.inverse_topk) < 1:
+        raise RuntimeError("--inverse-topk must be >= 1.")
+    if not (0.5 <= float(args.inverse_confidence) < 1.0):
+        raise RuntimeError("--inverse-confidence must be in [0.5, 1.0).")
+
+
+    dedup_targets: List[float] = []
+    for t in [float(v) for v in args.inverse_targets]:
+        if t not in dedup_targets:
+            dedup_targets.append(t)
+    args.inverse_targets = dedup_targets
+    return args
 
 
 def auto_pick_input_file(user_path: Optional[str]) -> Path:
@@ -79,7 +184,11 @@ def auto_pick_input_file(user_path: Optional[str]) -> Path:
             raise FileNotFoundError(f"Input file not found: {p}")
         return p
 
-    candidates = sorted(list(Path.cwd().glob("*.csv")) + list(Path.cwd().glob("*.xlsx")))
+    candidates = sorted(
+        list(Path.cwd().glob("*.csv")) +
+        list(Path.cwd().glob("*.xlsx")) +
+        list(Path.cwd().glob("*.xls"))
+    )
     if len(candidates) == 1:
         return candidates[0]
     if len(candidates) == 0:
@@ -111,15 +220,129 @@ def normalize_col_name(name: str) -> str:
     return " ".join(s.split())
 
 
-def load_dataframe(path: Path, target_hint: str, header_idx: int) -> pd.DataFrame:
-    if path.suffix.lower() == ".xlsx":
+def canonical_col_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def resolve_column_name(columns: List[str], candidates: List[str]) -> Optional[str]:
+    if not columns:
+        return None
+    cols = [str(c) for c in columns]
+    cand = [str(c).strip() for c in candidates if str(c).strip()]
+    if not cand:
+        return None
+
+
+    for t in cand:
+        if t in cols:
+            return t
+
+
+    lower_map = {c.lower(): c for c in cols}
+    for t in cand:
+        if t.lower() in lower_map:
+            return lower_map[t.lower()]
+
+
+    canon_map: Dict[str, str] = {}
+    for c in cols:
+        canon_map.setdefault(canonical_col_name(c), c)
+    for t in cand:
+        key = canonical_col_name(t)
+        if key in canon_map:
+            return canon_map[key]
+    return None
+
+
+def _read_table_with_header(path: Path, header_idx: int) -> pd.DataFrame:
+    if path.suffix.lower() in {".xlsx", ".xls"}:
         df = pd.read_excel(path, header=header_idx)
     else:
         df = pd.read_csv(path, header=header_idx)
     df.columns = [normalize_col_name(c) for c in df.columns]
-    if target_hint not in df.columns:
-        raise SystemExit(f"Target column '{target_hint}' not found in input columns.")
     return df
+
+
+def load_dataframe(
+    path: Path,
+    target_hint: str,
+    target_aliases: List[str],
+    header_idx: int,
+) -> Tuple[pd.DataFrame, str, int]:
+    candidates: List[str] = []
+    for c in [target_hint] + list(target_aliases) + DEFAULT_TARGET_ALIASES:
+        c2 = str(c).strip()
+        if c2 and c2 not in candidates:
+            candidates.append(c2)
+
+    search_headers = [header_idx] if header_idx >= 0 else [0, 1, 2, 3]
+    if header_idx >= 0:
+        for h in [0, 1, 2, 3]:
+            if h not in search_headers:
+                search_headers.append(h)
+
+    last_cols: List[str] = []
+    load_errors: List[str] = []
+    for h in search_headers:
+        try:
+            df = _read_table_with_header(path, h)
+        except Exception as ex:
+            load_errors.append(f"header={h}: {ex}")
+            continue
+
+        target_col = resolve_column_name(df.columns.tolist(), candidates)
+        if target_col is not None:
+            return df, target_col, h
+        last_cols = [str(c) for c in df.columns.tolist()]
+
+    cols_preview = ", ".join(last_cols[:30]) if last_cols else "<no columns>"
+    extra = f"\nLoad attempts failed:\n- " + "\n- ".join(load_errors) if load_errors else ""
+    raise SystemExit(
+        "Could not resolve target column from provided aliases.\n"
+        f"Tried targets: {candidates}\n"
+        f"Tried headers: {search_headers}\n"
+        f"Columns preview: {cols_preview}{extra}"
+    )
+
+
+def parse_inverse_pollutant_values(cli_values: List[str], file_path: str) -> List[str]:
+    values: List[str] = []
+
+    def _push_token(tok: str) -> None:
+        t = str(tok).strip()
+        if t and t not in values:
+            values.append(t)
+
+    for raw in cli_values or []:
+        parts = [p.strip() for p in str(raw).split(",")]
+        for p in parts:
+            _push_token(p)
+
+    if file_path:
+        p = Path(file_path)
+        if not p.exists():
+            raise RuntimeError(f"Inverse pollutants file not found: {p}")
+        suffix = p.suffix.lower()
+        if suffix == ".json":
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict) and isinstance(data.get("pollutants"), list):
+                items = data["pollutants"]
+            else:
+                raise RuntimeError("JSON pollutant file must be a list or a dict with key 'pollutants'.")
+            for it in items:
+                _push_token(str(it))
+        else:
+            text = p.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                for part in s.split(","):
+                    _push_token(part)
+
+    return values
 
 
 def apply_target_mask(
@@ -577,6 +800,238 @@ def evaluate_high_focus(
     }
 
 
+def _is_integer_like_series(s: pd.Series) -> bool:
+    s_num = pd.to_numeric(s, errors="coerce").dropna()
+    if s_num.empty:
+        return False
+    frac = np.abs(s_num - np.round(s_num))
+    return bool((frac < 1e-9).mean() > 0.98)
+
+
+def _resolve_controllable_columns(
+    X_train: pd.DataFrame,
+    pollutant_col: str,
+    user_cols: List[str],
+) -> List[str]:
+    if user_cols:
+        cols_resolved: List[str] = []
+        missing: List[str] = []
+        for c in user_cols:
+            resolved = resolve_column_name(X_train.columns.tolist(), [str(c)])
+            if resolved is None:
+                missing.append(str(c))
+            elif resolved not in cols_resolved:
+                cols_resolved.append(resolved)
+        if missing:
+            raise RuntimeError(f"Inverse controllable columns not found in selected features: {missing}")
+        cols = [c for c in cols_resolved if c != pollutant_col]
+        if not cols:
+            raise RuntimeError("No controllable columns remain after removing pollutant column.")
+        return cols
+
+    num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+    cols = [c for c in num_cols if c != pollutant_col]
+    if not cols:
+        raise RuntimeError(
+            "Could not auto-resolve controllable columns. Pass --inverse-controllable-cols explicitly."
+        )
+    return cols
+
+
+def _sample_inverse_candidates(
+    X_ref: pd.DataFrame,
+    n_samples: int,
+    seed: int,
+    pollutant_col: str,
+    pollutant_value: str,
+    controllable_cols: List[str],
+) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    out = pd.DataFrame(index=np.arange(n_samples), columns=X_ref.columns)
+
+    num_cols = X_ref.select_dtypes(include=[np.number]).columns.tolist()
+    base_pool = X_ref.copy()
+    if pollutant_col in X_ref.columns:
+        pool_mask = X_ref[pollutant_col].astype(str) == str(pollutant_value)
+        if int(pool_mask.sum()) > 5:
+            base_pool = X_ref.loc[pool_mask].copy()
+
+    for col in X_ref.columns:
+        if col not in controllable_cols:
+            if col == pollutant_col:
+                out[col] = str(pollutant_value)
+                continue
+            s_fix = base_pool[col]
+            if pd.api.types.is_numeric_dtype(s_fix):
+                med = pd.to_numeric(s_fix, errors="coerce").median()
+                out[col] = float(med) if np.isfinite(med) else 0.0
+            else:
+                mode_vals = s_fix.astype(str).mode(dropna=True)
+                out[col] = str(mode_vals.iloc[0]) if not mode_vals.empty else "<missing>"
+            continue
+
+        if col in num_cols:
+            s = pd.to_numeric(base_pool[col], errors="coerce")
+            q05 = float(s.quantile(0.05))
+            q50 = float(s.quantile(0.50))
+            q95 = float(s.quantile(0.95))
+            if np.isfinite(q05) and np.isfinite(q95) and q95 > q05:
+                vals = rng.uniform(q05, q95, size=n_samples)
+            elif np.isfinite(q50):
+                vals = np.full(n_samples, q50, dtype=float)
+            else:
+                vals = np.zeros(n_samples, dtype=float)
+            if _is_integer_like_series(s):
+                vals = np.round(vals)
+            out[col] = vals
+        else:
+            s = base_pool[col].astype(str).fillna("<missing>")
+            vc = s.value_counts(normalize=True)
+            choices = vc.index.to_list()
+            probs = vc.values
+            if len(choices) == 0:
+                out[col] = "<missing>"
+            else:
+                out[col] = rng.choice(choices, size=n_samples, replace=True, p=probs)
+
+    return out[X_ref.columns]
+
+
+def run_inverse_design(
+    best_model,
+    X_train: pd.DataFrame,
+    y_train_orig: pd.Series,
+    target_rates: List[float],
+    pollutant_col: str,
+    pollutant_values: List[str],
+    controllable_cols: List[str],
+    n_samples: int,
+    topk: int,
+    confidence_level: float,
+    seed: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    resolved_pollutant_col = resolve_column_name(X_train.columns.tolist(), [pollutant_col])
+    if resolved_pollutant_col is None:
+        raise RuntimeError(
+            f"Pollutant column '{pollutant_col}' is not in selected model features. "
+            "Use --inverse-pollutant-col with an available feature or adjust filtering."
+        )
+    pollutant_col = resolved_pollutant_col
+
+    if not pollutant_values:
+        vc = X_train[pollutant_col].astype(str).value_counts()
+        pollutant_values = vc.head(3).index.tolist()
+    pollutant_values = [str(v) for v in pollutant_values]
+    controllable_cols = _resolve_controllable_columns(X_train, pollutant_col, controllable_cols)
+
+    conf = float(confidence_level)
+    if not (0.5 <= conf < 1.0):
+        raise RuntimeError("inverse-confidence must be in [0.5, 1.0).")
+    q_lo = (1.0 - conf) / 2.0
+    q_hi = 1.0 - q_lo
+
+    rows: List[pd.DataFrame] = []
+    ranges_rows: List[Dict[str, Any]] = []
+    best_rows: List[Dict[str, Any]] = []
+
+    med = X_train[controllable_cols].median(numeric_only=True)
+    iqr = (X_train[controllable_cols].quantile(0.75) - X_train[controllable_cols].quantile(0.25)).replace(0.0, 1.0)
+
+    for p_idx, pol in enumerate(pollutant_values):
+        candidates = _sample_inverse_candidates(
+            X_ref=X_train,
+            n_samples=n_samples,
+            seed=seed + 97 * (p_idx + 1),
+            pollutant_col=pollutant_col,
+            pollutant_value=pol,
+            controllable_cols=controllable_cols,
+        )
+
+        preds_trans = best_model.predict(candidates)
+        preds_orig = target_inverse_transform(preds_trans)
+
+        z = (candidates[controllable_cols] - med).abs().div(iqr, axis=1)
+        plausibility = np.exp(-np.clip(z.mean(axis=1).to_numpy(dtype=float), 0.0, 8.0))
+
+        for target in target_rates:
+            tmp = candidates.copy()
+            tmp["pollutant_input"] = pol
+            tmp["target_removal_rate"] = float(target)
+            tmp["predicted_removal_rate"] = preds_orig
+            tmp["abs_error_to_target"] = np.abs(tmp["predicted_removal_rate"] - float(target))
+            tmp["plausibility_score"] = plausibility
+            tmp = tmp.sort_values(
+                by=["abs_error_to_target", "plausibility_score"],
+                ascending=[True, False],
+            ).head(max(1, int(topk))).copy()
+            tmp["rank"] = np.arange(1, len(tmp) + 1)
+            rows.append(tmp)
+
+            b = tmp.iloc[0]
+            best_rows.append(
+                {
+                    "pollutant_input": pol,
+                    "target_removal_rate": float(target),
+                    "predicted_removal_rate": float(b["predicted_removal_rate"]),
+                    "abs_error_to_target": float(b["abs_error_to_target"]),
+                    "plausibility_score": float(b["plausibility_score"]),
+                }
+            )
+
+            pred_q = tmp["predicted_removal_rate"].quantile([q_lo, 0.5, q_hi])
+            for col in controllable_cols:
+                s_col = pd.to_numeric(tmp[col], errors="coerce")
+                if s_col.notna().sum() == 0:
+                    continue
+                col_q = s_col.quantile([q_lo, 0.5, q_hi])
+                ranges_rows.append(
+                    {
+                        "pollutant_input": pol,
+                        "target_removal_rate": float(target),
+                        "parameter": col,
+                        "value_low": float(col_q.loc[q_lo]),
+                        "value_median": float(col_q.loc[0.5]),
+                        "value_high": float(col_q.loc[q_hi]),
+                        "confidence_level": conf,
+                        "achievable_removal_low": float(pred_q.loc[q_lo]),
+                        "achievable_removal_median": float(pred_q.loc[0.5]),
+                        "achievable_removal_high": float(pred_q.loc[q_hi]),
+                    }
+                )
+
+    inverse_table = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    col_order = [
+        "pollutant_input",
+        "target_removal_rate",
+        "rank",
+        "predicted_removal_rate",
+        "abs_error_to_target",
+        "plausibility_score",
+        pollutant_col,
+    ] + controllable_cols
+    if not inverse_table.empty:
+        keep_cols = [c for c in col_order if c in inverse_table.columns]
+        inverse_table = inverse_table[keep_cols]
+
+    ranges_table = pd.DataFrame(ranges_rows)
+    summary: Dict[str, Any] = {
+        "enabled": True,
+        "pollutant_column": pollutant_col,
+        "pollutants_requested": pollutant_values,
+        "controllable_columns": controllable_cols,
+        "targets": [float(t) for t in target_rates],
+        "n_candidates_sampled_per_pollutant": int(n_samples),
+        "topk_per_target": int(topk),
+        "confidence_level": conf,
+        "best_recommendations": best_rows,
+        "training_target_range": [
+            float(np.nanmin(y_train_orig.to_numpy(dtype=float))),
+            float(np.nanmax(y_train_orig.to_numpy(dtype=float))),
+        ],
+    }
+    return inverse_table, ranges_table, summary
+
+
 def build_low_failure_report(
     best_model,
     X_low: pd.DataFrame,
@@ -757,28 +1212,39 @@ def build_kmeans_moe(
 
 
 def main() -> None:
-    args = parse_args()
+    args = validate_and_normalize_args(parse_args())
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     input_path = auto_pick_input_file(args.input_file)
     print(f"Using input file: {input_path}")
 
-    df = load_dataframe(input_path, args.target, args.header)
-    df = add_rdkit_descriptors(df)
+    df, target_col, used_header = load_dataframe(
+        path=input_path,
+        target_hint=args.target,
+        target_aliases=list(args.target_aliases),
+        header_idx=int(args.header),
+    )
+    if int(args.header) >= 0 and used_header != int(args.header):
+        print(
+            f"Requested header={args.header} did not resolve target; "
+            f"using header={used_header} based on target matching."
+        )
+    elif int(args.header) < 0:
+        print(f"Auto header detection selected header={used_header}.")
+    print(f"Resolved target column: {target_col}")
 
-    target_col = args.target
+    df = add_rdkit_descriptors(df)
 
     masking_report = {}
 
+    df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
     if args.target_mask_range:
         df, masked_idx = apply_target_mask(df, target_col, tuple(args.target_mask_range))
         masking_report['target_mask'] = {
             'range': args.target_mask_range,
             'masked_rows': len(masked_idx)
         }
-
-    df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
     df = df.dropna(subset=[target_col]).copy()
 
     drop_like = ["number", "index", "unnamed: 0"]
@@ -864,7 +1330,7 @@ def main() -> None:
         print("\n--- DRY RUN: DATA PIPELINE CHECK ---")
         print(f"Dataframe initial shape: {df.shape}")
         print(f"Target column: {target_col}")
-        print(f"Number of target missing values dropped.")
+        print(f"Rows after target cleanup: {len(df)}")
         print(f"X_train shape: {X_train.shape}")
         print(f"X_test shape: {X_test.shape}")
         print(f"y_train_orig shape: {y_train_orig.shape}")
@@ -1028,8 +1494,7 @@ def main() -> None:
         test_predictions["actual"] >= args.high_threshold, "high", "low"
     )
 
-    high_plot = test_predictions[test_predictions["zone"] == "high"].copy()
-    if high_plot.empty:
+    if not (test_predictions["zone"] == "high").any():
         raise RuntimeError("No high-zone rows available for visualization.")
 
     sns.set_theme(style="whitegrid", context="notebook")
@@ -1262,6 +1727,75 @@ def main() -> None:
     else:
         pd.DataFrame(columns=["feature", "high_train_median", "low_median", "abs_gap"]).to_csv(low_gap_path, index=False)
 
+    inverse_design_path = None
+    inverse_ranges_path = None
+    inverse_summary_path = None
+    inverse_plot_path = None
+    inverse_summary: Dict[str, Any] = {"enabled": False, "reason": "Disabled by user"}
+    if not args.disable_inverse:
+        targets = [float(t) for t in args.inverse_targets]
+        if any((t < 0.0 or t > 100.0) for t in targets):
+            raise RuntimeError("All inverse targets must be within [0, 100].")
+        pollutant_values = parse_inverse_pollutant_values(
+            cli_values=[str(v) for v in args.inverse_pollutants],
+            file_path=str(args.inverse_pollutants_file),
+        )
+
+        inverse_table, inverse_ranges, inverse_summary = run_inverse_design(
+            best_model=best_model,
+            X_train=X_train,
+            y_train_orig=y_train_orig,
+            target_rates=targets,
+            pollutant_col=str(args.inverse_pollutant_col),
+            pollutant_values=pollutant_values,
+            controllable_cols=[str(c) for c in args.inverse_controllable_cols],
+            n_samples=max(2000, int(args.inverse_samples)),
+            topk=max(1, int(args.inverse_topk)),
+            confidence_level=float(args.inverse_confidence),
+            seed=args.seed + 313,
+        )
+        inverse_design_path = data_dir / "inverse_design_recommendations.csv"
+        inverse_table.to_csv(inverse_design_path, index=False)
+        inverse_ranges_path = data_dir / "inverse_parameter_ranges.csv"
+        inverse_ranges.to_csv(inverse_ranges_path, index=False)
+
+        inverse_summary_path = reports_dir / "inverse_design_summary.json"
+        inverse_summary_path.write_text(json.dumps(inverse_summary, indent=2), encoding="utf-8")
+
+        fig_inv, ax_inv = plt.subplots(figsize=(10, 7))
+        pollutant_vals = inverse_table["pollutant_input"].astype(str).unique().tolist()
+        cmap = sns.color_palette("viridis", n_colors=max(3, len(pollutant_vals)))
+        for i, pol in enumerate(pollutant_vals):
+            s = inverse_table[inverse_table["pollutant_input"].astype(str) == str(pol)]
+            if s.empty:
+                continue
+            ax_inv.scatter(
+                s["predicted_removal_rate"],
+                s["plausibility_score"],
+                s=42 + 10 * (s["rank"].max() - s["rank"] + 1),
+                alpha=0.8,
+                color=cmap[i],
+                label=f"{pol}",
+                edgecolor="black",
+                linewidth=0.3,
+            )
+            best = s.nsmallest(1, "abs_error_to_target").iloc[0]
+            ax_inv.text(
+                float(best["predicted_removal_rate"]) + 0.05,
+                float(best["plausibility_score"]),
+                f"best t={best['target_removal_rate']:.1f}%",
+                fontsize=8,
+            )
+        ax_inv.set_title("Inverse Design Candidates by Pollutant")
+        ax_inv.set_xlabel("Predicted Removal Rate (%)")
+        ax_inv.set_ylabel("Plausibility Score (higher is closer to training manifold)")
+        ax_inv.grid(alpha=0.25)
+        ax_inv.legend(title="Pollutant", loc="best", fontsize=9)
+        plt.tight_layout()
+        inverse_plot_path = figures_dir / "inverse_design_candidates.png"
+        plt.savefig(inverse_plot_path, dpi=170, bbox_inches="tight")
+        plt.close()
+
     predictions_path = data_dir / "test_predictions.csv"
     test_predictions.reset_index(drop=True).to_csv(predictions_path, index=False)
     metrics_path = data_dir / "metrics_leaderboard.csv"
@@ -1315,6 +1849,14 @@ def main() -> None:
         artifacts["figures"]["feature_gaps"] = str(gap_plot_path)
     if vif_table_path:
         artifacts["data"]["vif_table"] = str(vif_table_path)
+    if inverse_design_path:
+        artifacts["data"]["inverse_design_recommendations"] = str(inverse_design_path)
+    if inverse_ranges_path:
+        artifacts["data"]["inverse_parameter_ranges"] = str(inverse_ranges_path)
+    if inverse_plot_path:
+        artifacts["figures"]["inverse_design_candidates"] = str(inverse_plot_path)
+    if inverse_summary_path:
+        artifacts["reports"]["inverse_design_summary"] = str(inverse_summary_path)
 
     report = {
         "input_file": str(input_path),
@@ -1337,6 +1879,7 @@ def main() -> None:
             if k != "vif_table"
         },
         "moe_report": moe_report,
+        "inverse_design": inverse_summary,
         "metrics": final_metrics.to_dict(orient="records"),
         "low_zone_diagnostics": low_summary,
         "artifacts": artifacts,
@@ -1349,6 +1892,10 @@ def main() -> None:
     print(f"Saved dashboard: {dashboard_path}")
     print(f"Saved predictions table: {predictions_path}")
     print(f"Saved metrics table: {metrics_path}")
+    if inverse_design_path:
+        print(f"Saved inverse recommendations: {inverse_design_path}")
+    if inverse_ranges_path:
+        print(f"Saved inverse parameter ranges: {inverse_ranges_path}")
 
 
 if __name__ == "__main__":
