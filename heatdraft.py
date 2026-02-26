@@ -1,5 +1,6 @@
 ﻿import argparse
 import json
+import pickle
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -24,6 +25,7 @@ from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, train_test_split
+from sklearn.neighbors import NearestNeighbors
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, RobustScaler
 from statsmodels.stats.outliers_influence import variance_inflation_factor
@@ -147,13 +149,36 @@ def parse_args() -> argparse.Namespace:
         help="Optional explicit list of controllable filter-property columns for inverse design.",
     )
     parser.add_argument(
+        "--inverse-auto-controllables",
+        action="store_true",
+        help="Allow inverse design to auto-pick numeric controllables if none are provided.",
+    )
+    parser.add_argument(
         "--inverse-confidence",
         type=float,
         default=0.80,
         help="Confidence level for suggested parameter ranges (e.g., 0.80 gives 10th-90th percentiles).",
     )
+    parser.add_argument(
+        "--inverse-low-risk-weight",
+        type=float,
+        default=15.0,
+        help="Penalty weight for low-risk score when ranking inverse candidates.",
+    )
+    parser.add_argument(
+        "--inverse-low-risk-k",
+        type=int,
+        default=25,
+        help="K neighbors used to estimate low-performance risk.",
+    )
     parser.add_argument("--target-mask-range", nargs=2, type=float, help="Mask target values in [low, high] (replace with NaN)")
     parser.add_argument("--dry-run", action="store_true", help="Run data prep only and print sanity checks, then exit")
+    parser.add_argument("--app", action="store_true", help="Launch interactive inverse-design app using a saved bundle.")
+    parser.add_argument(
+        "--app-bundle",
+        default="outputs/reports/app_bundle.pkl",
+        help="Path to a saved app bundle for interactive mode.",
+    )
     return parser.parse_args()
 
 
@@ -186,6 +211,10 @@ def validate_and_normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         raise RuntimeError("--inverse-topk must be >= 1.")
     if not (0.5 <= float(args.inverse_confidence) < 1.0):
         raise RuntimeError("--inverse-confidence must be in [0.5, 1.0).")
+    if float(args.inverse_low_risk_weight) < 0.0:
+        raise RuntimeError("--inverse-low-risk-weight must be >= 0.")
+    if int(args.inverse_low_risk_k) < 1:
+        raise RuntimeError("--inverse-low-risk-k must be >= 1.")
 
 
     dedup_targets: List[float] = []
@@ -829,6 +858,35 @@ def target_inverse_transform(y_trans: Union[pd.Series, np.ndarray]) -> np.ndarra
     return 100.0 * p
 
 
+def build_low_risk_model(
+    X_train: pd.DataFrame,
+    y_train_orig: pd.Series,
+    preprocessor: ColumnTransformer,
+    high_threshold: float,
+    n_neighbors: int,
+) -> Dict[str, Any]:
+    prep = clone(preprocessor)
+    X_trans = prep.fit_transform(X_train, y_train_orig)
+    n_neighbors = int(max(3, n_neighbors))
+    nn = NearestNeighbors(n_neighbors=n_neighbors, metric="euclidean")
+    nn.fit(X_trans)
+    low_mask = (y_train_orig < high_threshold).to_numpy()
+    return {
+        "preprocessor": prep,
+        "neighbors": nn,
+        "low_mask": low_mask,
+        "n_neighbors": n_neighbors,
+    }
+
+
+def score_low_risk(risk_model: Dict[str, Any], X_candidates: pd.DataFrame) -> np.ndarray:
+    X_trans = risk_model["preprocessor"].transform(X_candidates)
+    dist, idx = risk_model["neighbors"].kneighbors(X_trans, return_distance=True)
+    weights = 1.0 / (dist + 1e-6)
+    low = risk_model["low_mask"][idx]
+    return (weights * low).sum(axis=1) / weights.sum(axis=1)
+
+
 def evaluate(name: str, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     mae = float(mean_absolute_error(y_true, y_pred))
@@ -867,9 +925,16 @@ def _resolve_controllable_columns(
     X_train: pd.DataFrame,
     pollutant_col: str,
     user_cols: List[str],
+    allow_auto: bool,
 ) -> List[str]:
     if not user_cols:
-        raise RuntimeError("Provide --inverse-controllable-cols explicitly. Auto fallback is disabled.")
+        if not allow_auto:
+            raise RuntimeError("Provide --inverse-controllable-cols explicitly. Auto fallback is disabled.")
+        numeric_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+        cols = [c for c in numeric_cols if c != pollutant_col]
+        if not cols:
+            raise RuntimeError("No numeric controllable columns available for auto-selection.")
+        return cols
 
     cols_resolved: List[str] = []
     missing: List[str] = []
@@ -968,6 +1033,9 @@ def run_inverse_design(
     n_samples: int,
     topk: int,
     confidence_level: float,
+    risk_model: Optional[Dict[str, Any]],
+    risk_weight: float,
+    allow_auto_controllables: bool,
     seed: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     if X_condition.empty:
@@ -983,16 +1051,18 @@ def run_inverse_design(
         )
     pollutant_col = resolved_pollutant_col
 
-    if not pollutant_values:
-        raise RuntimeError(
-            "Provide pollutant inputs explicitly using --inverse-pollutants or --inverse-pollutants-file."
-        )
-    pollutant_values = [str(v) for v in pollutant_values]
-    controllable_cols = _resolve_controllable_columns(X_train, pollutant_col, controllable_cols)
     pollutant_series = X_condition.loc[X_train.index, pollutant_col]
     if pollutant_series.notna().sum() == 0:
         raise RuntimeError("Resolved pollutant column has no usable values in training rows.")
     pollutant_series = pollutant_series.astype(str)
+    if not pollutant_values:
+        pollutant_values = (
+            pollutant_series.value_counts().head(3).index.astype(str).tolist()
+        )
+    pollutant_values = [str(v) for v in pollutant_values]
+    controllable_cols = _resolve_controllable_columns(
+        X_train, pollutant_col, controllable_cols, allow_auto_controllables
+    )
 
     conf = float(confidence_level)
     if not (0.5 <= conf < 1.0):
@@ -1025,6 +1095,9 @@ def run_inverse_design(
 
         preds_trans = best_model.predict(candidates)
         preds_orig = target_inverse_transform(preds_trans)
+        risk_scores = None
+        if risk_model is not None and float(risk_weight) > 0:
+            risk_scores = score_low_risk(risk_model, candidates)
 
         z = (candidates[controllable_cols] - med).abs().div(iqr, axis=1)
         plausibility = np.exp(-np.clip(z.mean(axis=1).to_numpy(dtype=float), 0.0, 8.0))
@@ -1036,10 +1109,20 @@ def run_inverse_design(
             tmp["predicted_removal_rate"] = preds_orig
             tmp["abs_error_to_target"] = np.abs(tmp["predicted_removal_rate"] - float(target))
             tmp["plausibility_score"] = plausibility
-            tmp = tmp.sort_values(
-                by=["abs_error_to_target", "plausibility_score"],
-                ascending=[True, False],
-            ).head(max(1, int(topk))).copy()
+            if risk_scores is not None:
+                tmp["low_risk_score"] = risk_scores
+                tmp["composite_score"] = (
+                    tmp["abs_error_to_target"] + float(risk_weight) * tmp["low_risk_score"]
+                )
+                tmp = tmp.sort_values(
+                    by=["composite_score", "abs_error_to_target", "plausibility_score"],
+                    ascending=[True, True, False],
+                ).head(max(1, int(topk))).copy()
+            else:
+                tmp = tmp.sort_values(
+                    by=["abs_error_to_target", "plausibility_score"],
+                    ascending=[True, False],
+                ).head(max(1, int(topk))).copy()
             tmp["rank"] = np.arange(1, len(tmp) + 1)
             rows.append(tmp)
 
@@ -1051,6 +1134,8 @@ def run_inverse_design(
                     "predicted_removal_rate": float(b["predicted_removal_rate"]),
                     "abs_error_to_target": float(b["abs_error_to_target"]),
                     "plausibility_score": float(b["plausibility_score"]),
+                    "low_risk_score": float(b["low_risk_score"]) if "low_risk_score" in b else None,
+                    "composite_score": float(b["composite_score"]) if "composite_score" in b else None,
                 }
             )
 
@@ -1083,6 +1168,8 @@ def run_inverse_design(
         "predicted_removal_rate",
         "abs_error_to_target",
         "plausibility_score",
+        "low_risk_score",
+        "composite_score",
         pollutant_col,
     ] + controllable_cols
     if not inverse_table.empty:
@@ -1099,6 +1186,10 @@ def run_inverse_design(
         "n_candidates_sampled_per_pollutant": int(n_samples),
         "topk_per_target": int(topk),
         "confidence_level": conf,
+        "low_risk_enabled": bool(risk_model is not None and float(risk_weight) > 0),
+        "low_risk_weight": float(risk_weight),
+        "low_risk_neighbors": int(risk_model["n_neighbors"]) if risk_model is not None else None,
+        "auto_controllables": bool(allow_auto_controllables),
         "best_recommendations": best_rows,
         "training_target_range": [
             float(np.nanmin(y_train_orig.to_numpy(dtype=float))),
@@ -1185,6 +1276,144 @@ def validate_pipeline_integrity(
         raise RuntimeError(
             f"Integrity check failed: train/test index overlap detected ({len(overlap)} rows)."
         )
+
+
+def save_app_bundle(path: Path, bundle: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        pickle.dump(bundle, f)
+
+
+def load_app_bundle(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"App bundle not found: {path}")
+    with path.open("rb") as f:
+        return pickle.load(f)
+
+
+def _parse_csv_tokens(text: str) -> List[str]:
+    tokens: List[str] = []
+    for part in str(text).split(","):
+        t = part.strip()
+        if t and t not in tokens:
+            tokens.append(t)
+    return tokens
+
+
+def _parse_float_tokens(text: str) -> List[float]:
+    out: List[float] = []
+    for part in _parse_csv_tokens(text):
+        try:
+            out.append(float(part))
+        except ValueError:
+            continue
+    return out
+
+
+def run_app(bundle_path: str) -> None:
+    bundle = load_app_bundle(Path(bundle_path))
+    X_train = bundle["X_train"]
+    X_train_raw = bundle["X_train_raw"]
+    y_train_orig = bundle["y_train_orig"]
+    best_model = bundle["best_model"]
+    target_col = bundle["target_col"]
+    high_threshold = float(bundle["high_threshold"])
+    risk_model = bundle.get("low_risk_model")
+    default_targets = bundle.get("default_inverse_targets", [90.0, 95.0, 98.0])
+    default_pollutant_col = bundle.get("pollutant_col_default", "TypesOfContaminants")
+    default_risk_weight = float(bundle.get("inverse_low_risk_weight", 15.0))
+    default_risk_k = int(bundle.get("inverse_low_risk_k", 25))
+
+    print("\nHeatDraft Inverse-Design App")
+    print("Type 'quit' to exit.\n")
+    print(f"Target column: {target_col}")
+    print(f"High-performance threshold: {high_threshold}")
+    print(f"Selected features: {len(X_train.columns)}")
+
+    while True:
+        raw_col = input(f"Pollutant column [{default_pollutant_col}]: ").strip()
+        if raw_col.lower() in {"quit", "exit", "q"}:
+            break
+        pollutant_col = raw_col or default_pollutant_col
+        resolved_col = resolve_column_name(X_train_raw.columns.tolist(), [pollutant_col])
+        if resolved_col is None:
+            print("Pollutant column not found in training data.")
+            continue
+        pollutant_col = resolved_col
+        freq_vals = (
+            X_train_raw[pollutant_col]
+            .astype(str)
+            .value_counts()
+            .head(5)
+            .index
+            .tolist()
+        )
+        raw_pollutants = input(f"Pollutant values (comma, default {freq_vals[:3]}): ").strip()
+        if raw_pollutants.lower() in {"quit", "exit", "q"}:
+            break
+        pollutants = _parse_csv_tokens(raw_pollutants) or [str(v) for v in freq_vals[:3]]
+
+        raw_targets = input(f"Target removal rates (comma, default {default_targets}): ").strip()
+        if raw_targets.lower() in {"quit", "exit", "q"}:
+            break
+        targets = _parse_float_tokens(raw_targets) or [float(v) for v in default_targets]
+
+        raw_controllables = input("Controllable columns (comma, blank for auto): ").strip()
+        if raw_controllables.lower() in {"quit", "exit", "q"}:
+            break
+        controllables = _parse_csv_tokens(raw_controllables)
+        if not controllables:
+            num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+            if len(num_cols) > 12:
+                variances = X_train[num_cols].var().sort_values(ascending=False)
+                controllables = variances.head(12).index.tolist()
+            else:
+                controllables = num_cols
+            print(f"Auto controllables: {controllables}")
+
+        raw_weight = input(f"Low-risk weight (default {default_risk_weight}): ").strip()
+        if raw_weight.lower() in {"quit", "exit", "q"}:
+            break
+        risk_weight = float(raw_weight) if raw_weight else default_risk_weight
+        if risk_model is None:
+            risk_model = build_low_risk_model(
+                X_train=X_train,
+                y_train_orig=y_train_orig,
+                preprocessor=build_preprocessor(X_train, knn_k=default_risk_k),
+                high_threshold=high_threshold,
+                n_neighbors=default_risk_k,
+            )
+
+        inverse_table, inverse_ranges, summary = run_inverse_design(
+            best_model=best_model,
+            X_train=X_train,
+            X_condition=X_train_raw,
+            y_train_orig=y_train_orig,
+            target_rates=targets,
+            pollutant_col=pollutant_col,
+            pollutant_values=pollutants,
+            controllable_cols=controllables,
+            n_samples=12000,
+            topk=12,
+            confidence_level=0.8,
+            risk_model=risk_model,
+            risk_weight=risk_weight,
+            allow_auto_controllables=False,
+            seed=42,
+        )
+
+        print("\nInverse recommendations (top rows):")
+        if inverse_table.empty:
+            print("No recommendations generated.")
+        else:
+            print(inverse_table.head(12).to_string(index=False))
+        print("\nInverse parameter ranges (top rows):")
+        if inverse_ranges.empty:
+            print("No ranges generated.")
+        else:
+            print(inverse_ranges.head(12).to_string(index=False))
+        print("\nSummary:")
+        print(json.dumps(summary, indent=2))
 
 
 class KMeansMoERegressor:
@@ -1296,6 +1525,9 @@ def build_kmeans_moe(
 
 def main() -> None:
     args = validate_and_normalize_args(parse_args())
+    if args.app:
+        run_app(str(args.app_bundle))
+        return
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -1427,6 +1659,13 @@ def main() -> None:
         sys.exit(0)
 
     preprocessor = build_preprocessor(X_train, knn_k=args.knn_k)
+    low_risk_model = build_low_risk_model(
+        X_train=X_train,
+        y_train_orig=y_train_orig,
+        preprocessor=preprocessor,
+        high_threshold=args.high_threshold,
+        n_neighbors=args.inverse_low_risk_k,
+    )
 
     model_names = ["xgboost", "extra_trees", "random_forest", "hist_gb"]
     per_model_trials = max(8, args.trials // len(model_names))
@@ -1844,6 +2083,9 @@ def main() -> None:
             n_samples=max(2000, int(args.inverse_samples)),
             topk=max(1, int(args.inverse_topk)),
             confidence_level=float(args.inverse_confidence),
+            risk_model=low_risk_model,
+            risk_weight=float(args.inverse_low_risk_weight),
+            allow_auto_controllables=bool(args.inverse_auto_controllables),
             seed=args.seed + 313,
         )
         inverse_design_path = data_dir / "inverse_design_recommendations.csv"
@@ -1896,6 +2138,27 @@ def main() -> None:
     calibration.to_csv(calibration_table_path, index=False)
     selected_features_path = data_dir / "selected_features.csv"
     pd.DataFrame({"feature": selected_columns}).to_csv(selected_features_path, index=False)
+    train_db = X_train_raw.copy()
+    train_db[target_col] = y_train_orig
+    train_db["zone"] = np.where(y_train_orig >= args.high_threshold, "high", "low")
+    training_db_path = data_dir / "training_database.csv"
+    train_db.to_csv(training_db_path, index=False)
+
+    app_bundle_path = reports_dir / "app_bundle.pkl"
+    app_bundle = {
+        "best_model": best_model,
+        "X_train": X_train,
+        "X_train_raw": X_train_raw,
+        "y_train_orig": y_train_orig,
+        "target_col": target_col,
+        "high_threshold": float(args.high_threshold),
+        "default_inverse_targets": [float(t) for t in args.inverse_targets],
+        "pollutant_col_default": str(args.inverse_pollutant_col),
+        "inverse_low_risk_weight": float(args.inverse_low_risk_weight),
+        "inverse_low_risk_k": int(args.inverse_low_risk_k),
+        "low_risk_model": low_risk_model,
+    }
+    save_app_bundle(app_bundle_path, app_bundle)
 
     best_params_path = reports_dir / "best_params.json"
     best_params_path.write_text(json.dumps(best_params_report, indent=2, default=str), encoding="utf-8")
@@ -1928,11 +2191,13 @@ def main() -> None:
             "selected_features": str(selected_features_path),
             "calibration_table": str(calibration_table_path),
             "low_zone_feature_gaps": str(low_gap_path),
+            "training_database": str(training_db_path),
         },
         "reports": {
             "low_zone_diagnostics": str(low_summary_path),
             "best_params": str(best_params_path),
             "split_summary": str(split_summary_path),
+            "app_bundle": str(app_bundle_path),
         },
     }
     if heatmap_path:
@@ -1971,6 +2236,11 @@ def main() -> None:
             if k != "vif_table"
         },
         "moe_report": moe_report,
+        "low_risk_model": {
+            "enabled": True,
+            "n_neighbors": int(low_risk_model["n_neighbors"]),
+            "inverse_low_risk_weight": float(args.inverse_low_risk_weight),
+        },
         "inverse_design": inverse_summary,
         "metrics": final_metrics.to_dict(orient="records"),
         "low_zone_diagnostics": low_summary,
