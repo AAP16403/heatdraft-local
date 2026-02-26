@@ -1,21 +1,50 @@
 feature
 Type of MB
+Compound Mw (g/mol)
+Compound size (nm)
+Compound stokes radius rs (nm)
+Compound charge
 Compound log K ow
+Density (g·cm-3)
 Diffusion coefficient (cm2·s-1)
 pKa1
+pKa2
 log D (pH=5.5)
+log D (pH=7.4)
 WS (mg/L)
 MinPartialCharge
+MaxPartialCharge
+Surface tension γs (dyne·cm-1)
+Min projection (Å)
+Max projection (Å)
 Total charge
+E
+S
 A
+B
+V
+MB MWCO (Da)
+MB pore radius rp (nm)
+rs/rp
+ΦS
 ΦD
 ∆Gs-m (J·m-2)
+MB contact angle (°)
+"MB surface energy, γm (J·m-2)"
+MB zeta potential (mV)
 "MB surface charge density , σm (mC·m-2)"
+"MB volume charge density, δm (mol·m-3)"
 RMS roughness (nm)
 Pressure (kPa)
 Measurement time (min)
 Initial concentration of compound (mg/L)
+pH
 Reference
+RD_MW
+RD_LogP
+RD_TPSA
+RD_HBA
+RD_HBD
 RD_Rings
 RD_RotBonds
 RD_FracCSP3

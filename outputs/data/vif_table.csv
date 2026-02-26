@@ -1,19 +1,20 @@
 feature,VIF
-ΦD,8.516
-Compound log K ow,7.12
-"MB surface charge density , σm (mC·m-2)",7.068
-pKa1,6.448
-Total charge,5.268
-log D (pH=5.5),4.915
-∆Gs-m (J·m-2),4.775
-RD_FracCSP3,4.273
-RD_RotBonds,4.183
-Pressure (kPa),4.168
-A,3.963
-RD_Rings,3.847
-RMS roughness (nm),2.529
-MinPartialCharge,2.21
-WS (mg/L),1.969
-Diffusion coefficient (cm2·s-1),1.846
-Measurement time (min),1.336
-Initial concentration of compound (mg/L),1.218
+ΦD,8.384
+pKa2,7.341
+"MB surface charge density , σm (mC·m-2)",7.078
+Compound log K ow,6.269
+Pressure (kPa),5.46
+pKa1,5.448
+Total charge,5.103
+RD_RotBonds,4.841
+∆Gs-m (J·m-2),4.641
+RD_FracCSP3,4.183
+A,4.067
+RD_Rings,4.004
+log D (pH=5.5),3.824
+RMS roughness (nm),2.511
+MinPartialCharge,2.207
+WS (mg/L),2.011
+Diffusion coefficient (cm2·s-1),1.887
+Measurement time (min),1.344
+Initial concentration of compound (mg/L),1.22

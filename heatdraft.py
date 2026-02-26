@@ -20,7 +20,7 @@ from sklearn.decomposition import PCA
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor, StackingRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.feature_selection import mutual_info_regression
-from sklearn.impute import SimpleImputer
+from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, train_test_split
@@ -70,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corr-threshold", type=float, default=0.92, help="Correlation threshold for dropping")
     parser.add_argument("--vif-threshold", type=float, default=10.0, help="VIF threshold")
     parser.add_argument("--nzv-threshold", type=float, default=0.01, help="Near-zero variance threshold")
+    parser.add_argument("--knn-k", type=int, default=5, help="K for KNN-based numeric imputation")
     parser.add_argument(
         "--max-cat-cardinality",
         type=int,
@@ -86,6 +87,18 @@ def parse_args() -> argparse.Namespace:
         "--disable-moe",
         action="store_true",
         help="Disable KMeans-gated Mixture-of-Experts stage",
+    )
+    parser.add_argument(
+        "--moe-clusters",
+        type=int,
+        default=2,
+        help="Number of MoE clusters.",
+    )
+    parser.add_argument(
+        "--moe-min-cluster-rows",
+        type=int,
+        default=20,
+        help="Hard minimum rows required per MoE cluster.",
     )
     parser.add_argument(
         "--disable-inverse",
@@ -153,6 +166,12 @@ def validate_and_normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         raise RuntimeError("--trials must be >= 1.")
     if int(args.seed) < 0:
         raise RuntimeError("--seed must be >= 0.")
+    if int(args.knn_k) < 1:
+        raise RuntimeError("--knn-k must be >= 1.")
+    if int(args.moe_clusters) < 2:
+        raise RuntimeError("--moe-clusters must be >= 2.")
+    if int(args.moe_min_cluster_rows) < 1:
+        raise RuntimeError("--moe-min-cluster-rows must be >= 1.")
     if args.target_mask_range:
         lo, hi = float(args.target_mask_range[0]), float(args.target_mask_range[1])
         if lo > hi:
@@ -276,10 +295,6 @@ def load_dataframe(
             candidates.append(c2)
 
     search_headers = [header_idx] if header_idx >= 0 else [0, 1, 2, 3]
-    if header_idx >= 0:
-        for h in [0, 1, 2, 3]:
-            if h not in search_headers:
-                search_headers.append(h)
 
     last_cols: List[str] = []
     load_errors: List[str] = []
@@ -401,13 +416,35 @@ def drop_near_zero_variance(X: pd.DataFrame, threshold: float) -> Tuple[pd.DataF
     return X.drop(columns=dropped), dropped
 
 
-def build_correlation_clusters(X: pd.DataFrame, threshold: float,
-                                method: str) -> List[List[str]]:
+def knn_impute_numeric_frame(
+    X_num: pd.DataFrame,
+    n_neighbors: int,
+    context: str,
+) -> pd.DataFrame:
+    if X_num.empty:
+        return X_num.copy()
+    all_nan_cols = [c for c in X_num.columns if X_num[c].notna().sum() == 0]
+    if all_nan_cols:
+        raise RuntimeError(
+            f"KNN imputation failed in {context}: all values are missing in columns {all_nan_cols}."
+        )
+    imputer = KNNImputer(n_neighbors=max(1, int(n_neighbors)), weights="distance")
+    arr = imputer.fit_transform(X_num)
+    out = pd.DataFrame(arr, columns=X_num.columns, index=X_num.index)
+    return out
+
+
+def build_correlation_clusters(
+    X: pd.DataFrame,
+    threshold: float,
+    method: str,
+    knn_k: int,
+) -> List[List[str]]:
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     if len(num_cols) < 2:
         return []
 
-    X_filled = X[num_cols].fillna(X[num_cols].median())
+    X_filled = knn_impute_numeric_frame(X[num_cols], n_neighbors=knn_k, context="correlation clustering")
 
     if method == "spearman":
         corr = X_filled.rank().corr(method="pearson").abs()
@@ -434,14 +471,24 @@ def build_correlation_clusters(X: pd.DataFrame, threshold: float,
     return clusters
 
 
-def select_cluster_representative(cluster: List[str], X: pd.DataFrame,
-                                   y: pd.Series, method: str) -> str:
+def select_cluster_representative(
+    cluster: List[str],
+    X: pd.DataFrame,
+    y: pd.Series,
+    method: str,
+    knn_k: int,
+) -> str:
     num_cols = [c for c in cluster if c in X.select_dtypes(include=[np.number]).columns]
     if not num_cols:
-        return cluster[0]
+        raise RuntimeError("Cluster representative selection requires numeric features.")
 
-    X_sub = X[num_cols].fillna(X[num_cols].median())
-    y_clean = y.fillna(y.median())
+    X_sub = knn_impute_numeric_frame(X[num_cols], n_neighbors=knn_k, context="cluster representative")
+    y_clean = pd.to_numeric(y, errors="coerce")
+    valid = y_clean.notna()
+    X_sub = X_sub.loc[valid]
+    y_clean = y_clean.loc[valid]
+    if len(y_clean) < 3:
+        raise RuntimeError("Insufficient finite target values for cluster representative selection.")
 
     if method == "mi":
         scores = mutual_info_regression(
@@ -461,7 +508,8 @@ def select_cluster_representative(cluster: List[str], X: pd.DataFrame,
 def drop_correlated_features(
     X: pd.DataFrame, y: pd.Series,
     corr_threshold: float, corr_method: str,
-    use_mi: bool, mi_corr_floor: float
+    use_mi: bool, mi_corr_floor: float,
+    knn_k: int,
 ) -> Tuple[pd.DataFrame, Dict]:
     report = {
         "original_features": X.shape[1],
@@ -470,11 +518,17 @@ def drop_correlated_features(
         "kept": [],
     }
 
-    clusters = build_correlation_clusters(X, corr_threshold, corr_method)
+    clusters = build_correlation_clusters(X, corr_threshold, corr_method, knn_k=knn_k)
 
     to_drop = set()
     for cluster in clusters:
-        rep = select_cluster_representative(cluster, X, y, "mi" if use_mi else corr_method)
+        rep = select_cluster_representative(
+            cluster,
+            X,
+            y,
+            "mi" if use_mi else corr_method,
+            knn_k=knn_k,
+        )
         drop_in_cluster = [c for c in cluster if c != rep]
         to_drop.update(drop_in_cluster)
         report["clusters"].append({
@@ -484,12 +538,12 @@ def drop_correlated_features(
         })
 
     if use_mi and mi_corr_floor < corr_threshold:
-        mi_clusters = build_correlation_clusters(X, mi_corr_floor, corr_method)
+        mi_clusters = build_correlation_clusters(X, mi_corr_floor, corr_method, knn_k=knn_k)
         for cluster in mi_clusters:
             remaining = [c for c in cluster if c not in to_drop]
             if len(remaining) < 2:
                 continue
-            rep = select_cluster_representative(remaining, X, y, "mi")
+            rep = select_cluster_representative(remaining, X, y, "mi", knn_k=knn_k)
             for c in remaining:
                 if c != rep:
                     to_drop.add(c)
@@ -503,10 +557,10 @@ def drop_correlated_features(
 
 
 def drop_high_vif_features(
-    X: pd.DataFrame, vif_threshold: float
+    X: pd.DataFrame, vif_threshold: float, knn_k: int
 ) -> Tuple[pd.DataFrame, List[str], pd.DataFrame]:
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-    X_num = X[num_cols].fillna(X[num_cols].median())
+    X_num = knn_impute_numeric_frame(X[num_cols], n_neighbors=knn_k, context="VIF filtering")
     X_num = X_num.loc[:, X_num.std() > 0]
     cols = X_num.columns.tolist()
     dropped_vif = []
@@ -549,6 +603,7 @@ def full_feature_selection(
     vif_threshold: float,
     enable_mi: bool,
     mi_corr_floor: float,
+    knn_k: int,
 ) -> Tuple[pd.DataFrame, Dict]:
     full_report = {"steps": {}}
     n_start = X.shape[1]
@@ -568,7 +623,7 @@ def full_feature_selection(
 
     print(f"  [Corr] Building correlation clusters (threshold={corr_threshold}, method={corr_method})...")
     X, corr_report = drop_correlated_features(
-        X, y, corr_threshold, corr_method, enable_mi, mi_corr_floor
+        X, y, corr_threshold, corr_method, enable_mi, mi_corr_floor, knn_k
     )
     full_report["steps"]["correlation"] = corr_report
     print(f'  [Corr] {corr_report["n_dropped"]} features dropped, '
@@ -577,7 +632,7 @@ def full_feature_selection(
     vif_table = pd.DataFrame()
     if enable_vif:
         print(f"  [VIF] Running VIF analysis (threshold={vif_threshold})...")
-        X, vif_dropped, vif_table = drop_high_vif_features(X, vif_threshold)
+        X, vif_dropped, vif_table = drop_high_vif_features(X, vif_threshold, knn_k)
         full_report["steps"]["vif"] = {
             "dropped": vif_dropped, "remaining": X.shape[1]
         }
@@ -630,13 +685,13 @@ def drop_high_cardinality_categoricals(
     return filtered, report
 
 
-def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
+def build_preprocessor(X: pd.DataFrame, knn_k: int) -> ColumnTransformer:
     numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = [c for c in X.columns if c not in numeric_cols]
 
     numeric_pipe = Pipeline(
         steps=[
-            ("imputer", SimpleImputer(strategy="median")),
+            ("imputer", KNNImputer(n_neighbors=max(1, int(knn_k)), weights="distance")),
             ("scaler", RobustScaler()),
         ]
     )
@@ -813,28 +868,22 @@ def _resolve_controllable_columns(
     pollutant_col: str,
     user_cols: List[str],
 ) -> List[str]:
-    if user_cols:
-        cols_resolved: List[str] = []
-        missing: List[str] = []
-        for c in user_cols:
-            resolved = resolve_column_name(X_train.columns.tolist(), [str(c)])
-            if resolved is None:
-                missing.append(str(c))
-            elif resolved not in cols_resolved:
-                cols_resolved.append(resolved)
-        if missing:
-            raise RuntimeError(f"Inverse controllable columns not found in selected features: {missing}")
-        cols = [c for c in cols_resolved if c != pollutant_col]
-        if not cols:
-            raise RuntimeError("No controllable columns remain after removing pollutant column.")
-        return cols
+    if not user_cols:
+        raise RuntimeError("Provide --inverse-controllable-cols explicitly. Auto fallback is disabled.")
 
-    num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
-    cols = [c for c in num_cols if c != pollutant_col]
+    cols_resolved: List[str] = []
+    missing: List[str] = []
+    for c in user_cols:
+        resolved = resolve_column_name(X_train.columns.tolist(), [str(c)])
+        if resolved is None:
+            missing.append(str(c))
+        elif resolved not in cols_resolved:
+            cols_resolved.append(resolved)
+    if missing:
+        raise RuntimeError(f"Inverse controllable columns not found in selected features: {missing}")
+    cols = [c for c in cols_resolved if c != pollutant_col]
     if not cols:
-        raise RuntimeError(
-            "Could not auto-resolve controllable columns. Pass --inverse-controllable-cols explicitly."
-        )
+        raise RuntimeError("No controllable columns remain after removing pollutant column.")
     return cols
 
 
@@ -842,57 +891,67 @@ def _sample_inverse_candidates(
     X_ref: pd.DataFrame,
     n_samples: int,
     seed: int,
-    pollutant_col: str,
-    pollutant_value: str,
+    pool_mask: pd.Series,
     controllable_cols: List[str],
 ) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     out = pd.DataFrame(index=np.arange(n_samples), columns=X_ref.columns)
 
     num_cols = X_ref.select_dtypes(include=[np.number]).columns.tolist()
-    base_pool = X_ref.copy()
-    if pollutant_col in X_ref.columns:
-        pool_mask = X_ref[pollutant_col].astype(str) == str(pollutant_value)
-        if int(pool_mask.sum()) > 5:
-            base_pool = X_ref.loc[pool_mask].copy()
+    if not isinstance(pool_mask, pd.Series):
+        raise RuntimeError("Inverse candidate generation failed: pool_mask must be a pandas Series.")
+    pool_mask = pool_mask.reindex(X_ref.index)
+    if pool_mask.isna().any():
+        raise RuntimeError("Inverse candidate generation failed: pollutant mask does not align with feature index.")
+    pool_mask = pool_mask.astype(bool)
+    if int(pool_mask.sum()) <= 5:
+        raise RuntimeError(
+            "Not enough conditioning rows in training data for requested pollutant (need > 5)."
+        )
+    base_pool = X_ref.loc[pool_mask].copy()
 
     for col in X_ref.columns:
         if col not in controllable_cols:
-            if col == pollutant_col:
-                out[col] = str(pollutant_value)
-                continue
             s_fix = base_pool[col]
             if pd.api.types.is_numeric_dtype(s_fix):
-                med = pd.to_numeric(s_fix, errors="coerce").median()
-                out[col] = float(med) if np.isfinite(med) else 0.0
+                finite_vals = pd.to_numeric(s_fix, errors="coerce").dropna().to_numpy(dtype=float)
+                if finite_vals.size == 0:
+                    raise RuntimeError(
+                        f"Inverse candidate generation failed: no finite values available for '{col}'."
+                    )
+                out[col] = rng.choice(finite_vals, size=n_samples, replace=True)
             else:
-                mode_vals = s_fix.astype(str).mode(dropna=True)
-                out[col] = str(mode_vals.iloc[0]) if not mode_vals.empty else "<missing>"
+                choices = s_fix.dropna().astype(str).unique()
+                if choices.size == 0:
+                    raise RuntimeError(
+                        f"Inverse candidate generation failed: no categorical values available for '{col}'."
+                    )
+                out[col] = rng.choice(choices, size=n_samples, replace=True)
             continue
 
         if col in num_cols:
             s = pd.to_numeric(base_pool[col], errors="coerce")
             q05 = float(s.quantile(0.05))
-            q50 = float(s.quantile(0.50))
             q95 = float(s.quantile(0.95))
             if np.isfinite(q05) and np.isfinite(q95) and q95 > q05:
                 vals = rng.uniform(q05, q95, size=n_samples)
-            elif np.isfinite(q50):
-                vals = np.full(n_samples, q50, dtype=float)
             else:
-                vals = np.zeros(n_samples, dtype=float)
+                raise RuntimeError(
+                    f"Inverse candidate generation failed: invalid numeric range for controllable '{col}'."
+                )
             if _is_integer_like_series(s):
                 vals = np.round(vals)
             out[col] = vals
         else:
-            s = base_pool[col].astype(str).fillna("<missing>")
+            s = base_pool[col].dropna().astype(str)
             vc = s.value_counts(normalize=True)
             choices = vc.index.to_list()
             probs = vc.values
             if len(choices) == 0:
-                out[col] = "<missing>"
-            else:
-                out[col] = rng.choice(choices, size=n_samples, replace=True, p=probs)
+                raise RuntimeError(
+                    f"Inverse candidate generation failed: no categorical values for controllable '{col}'."
+                )
+            out[col] = rng.choice(choices, size=n_samples, replace=True, p=probs)
 
     return out[X_ref.columns]
 
@@ -900,6 +959,7 @@ def _sample_inverse_candidates(
 def run_inverse_design(
     best_model,
     X_train: pd.DataFrame,
+    X_condition: pd.DataFrame,
     y_train_orig: pd.Series,
     target_rates: List[float],
     pollutant_col: str,
@@ -910,19 +970,29 @@ def run_inverse_design(
     confidence_level: float,
     seed: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
-    resolved_pollutant_col = resolve_column_name(X_train.columns.tolist(), [pollutant_col])
+    if X_condition.empty:
+        raise RuntimeError("Inverse conditioning frame is empty.")
+    if not X_train.index.isin(X_condition.index).all():
+        raise RuntimeError("Inverse conditioning frame does not fully cover selected-train index.")
+
+    resolved_pollutant_col = resolve_column_name(X_condition.columns.tolist(), [pollutant_col])
     if resolved_pollutant_col is None:
         raise RuntimeError(
-            f"Pollutant column '{pollutant_col}' is not in selected model features. "
-            "Use --inverse-pollutant-col with an available feature or adjust filtering."
+            f"Pollutant column '{pollutant_col}' is not available in raw training features. "
+            "Use --inverse-pollutant-col with an available raw feature."
         )
     pollutant_col = resolved_pollutant_col
 
     if not pollutant_values:
-        vc = X_train[pollutant_col].astype(str).value_counts()
-        pollutant_values = vc.head(3).index.tolist()
+        raise RuntimeError(
+            "Provide pollutant inputs explicitly using --inverse-pollutants or --inverse-pollutants-file."
+        )
     pollutant_values = [str(v) for v in pollutant_values]
     controllable_cols = _resolve_controllable_columns(X_train, pollutant_col, controllable_cols)
+    pollutant_series = X_condition.loc[X_train.index, pollutant_col]
+    if pollutant_series.notna().sum() == 0:
+        raise RuntimeError("Resolved pollutant column has no usable values in training rows.")
+    pollutant_series = pollutant_series.astype(str)
 
     conf = float(confidence_level)
     if not (0.5 <= conf < 1.0):
@@ -938,14 +1008,20 @@ def run_inverse_design(
     iqr = (X_train[controllable_cols].quantile(0.75) - X_train[controllable_cols].quantile(0.25)).replace(0.0, 1.0)
 
     for p_idx, pol in enumerate(pollutant_values):
+        pol_mask = pollutant_series == str(pol)
+        if int(pol_mask.sum()) <= 5:
+            raise RuntimeError(
+                f"Not enough rows for pollutant '{pol}' in training data (need > 5)."
+            )
         candidates = _sample_inverse_candidates(
             X_ref=X_train,
             n_samples=n_samples,
             seed=seed + 97 * (p_idx + 1),
-            pollutant_col=pollutant_col,
-            pollutant_value=pol,
+            pool_mask=pol_mask,
             controllable_cols=controllable_cols,
         )
+        if pollutant_col in candidates.columns:
+            candidates[pollutant_col] = str(pol)
 
         preds_trans = best_model.predict(candidates)
         preds_orig = target_inverse_transform(preds_trans)
@@ -1115,7 +1191,7 @@ class KMeansMoERegressor:
     def __init__(
         self,
         gate_cols: List[str],
-        gate_imputer: SimpleImputer,
+        gate_imputer: KNNImputer,
         gate_scaler: RobustScaler,
         gate_pca: PCA,
         gate_model: KMeans,
@@ -1153,14 +1229,21 @@ def build_kmeans_moe(
     high_threshold_trans: float,
     weight_ratio: float,
     seed: int,
+    knn_k: int,
     n_clusters: int = 2,
     min_cluster_rows: int = 25,
 ) -> Tuple[KMeansMoERegressor, Dict[str, Any]]:
     gate_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
     if len(gate_cols) < 2:
         raise RuntimeError("MoE requires at least 2 numeric columns for gating.")
+    if X_train.shape[0] < n_clusters * min_cluster_rows:
+        raise RuntimeError(
+            f"MoE infeasible: train rows={X_train.shape[0]} < "
+            f"n_clusters*min_cluster_rows={n_clusters * min_cluster_rows}. "
+            f"Adjust --moe-clusters or --moe-min-cluster-rows."
+        )
 
-    gate_imputer = SimpleImputer(strategy="median")
+    gate_imputer = KNNImputer(n_neighbors=max(1, int(knn_k)), weights="distance")
     gate_scaler = RobustScaler()
     X_gate = gate_imputer.fit_transform(X_train[gate_cols])
     X_gate = gate_scaler.fit_transform(X_gate)
@@ -1225,13 +1308,10 @@ def main() -> None:
         target_aliases=list(args.target_aliases),
         header_idx=int(args.header),
     )
-    if int(args.header) >= 0 and used_header != int(args.header):
-        print(
-            f"Requested header={args.header} did not resolve target; "
-            f"using header={used_header} based on target matching."
-        )
-    elif int(args.header) < 0:
+    if int(args.header) < 0:
         print(f"Auto header detection selected header={used_header}.")
+    else:
+        print(f"Using header={used_header}.")
     print(f"Resolved target column: {target_col}")
 
     df = add_rdkit_descriptors(df)
@@ -1292,6 +1372,7 @@ def main() -> None:
             vif_threshold=args.vif_threshold,
             enable_mi=True,
             mi_corr_floor=0.85,
+            knn_k=args.knn_k,
         )
         selected_columns = X_train_sel.columns.tolist()
         print(f"  Final TRAIN features: {len(selected_columns)} (dropped {feature_selection_report['total_dropped']})")
@@ -1345,7 +1426,7 @@ def main() -> None:
         print("All data prep steps completed successfully! Exiting (--dry-run).")
         sys.exit(0)
 
-    preprocessor = build_preprocessor(X_train)
+    preprocessor = build_preprocessor(X_train, knn_k=args.knn_k)
 
     model_names = ["xgboost", "extra_trees", "random_forest", "hist_gb"]
     per_model_trials = max(8, args.trials // len(model_names))
@@ -1435,6 +1516,10 @@ def main() -> None:
     moe_report: Dict[str, Any] = {"enabled": False, "reason": "Disabled by user"}
     moe_model: Optional[KMeansMoERegressor] = None
     if not args.disable_moe:
+        print(
+            f"Building MoE with n_clusters={args.moe_clusters}, "
+            f"min_cluster_rows={args.moe_min_cluster_rows}..."
+        )
         moe_model, moe_report = build_kmeans_moe(
             expert_template=final_stack_pipe,
             X_train=X_train,
@@ -1442,8 +1527,9 @@ def main() -> None:
             high_threshold_trans=high_threshold_trans,
             weight_ratio=weight_ratio,
             seed=args.seed,
-            n_clusters=2,
-            min_cluster_rows=25,
+            knn_k=args.knn_k,
+            n_clusters=args.moe_clusters,
+            min_cluster_rows=args.moe_min_cluster_rows,
         )
         moe_preds_trans = moe_model.predict(X_test)
         moe_preds_orig = target_inverse_transform(moe_preds_trans)
@@ -1638,7 +1724,12 @@ def main() -> None:
             (axes2[1], num_after, f"After Dropping ({len(num_after)} features)"),
         ]:
             if len(cols) > 0:
-                data = X_train_pre[cols].fillna(X_train_pre[cols].median()) if "Before" in title else X_train[cols].fillna(X_train[cols].median())
+                src = X_train_pre if "Before" in title else X_train
+                data = knn_impute_numeric_frame(
+                    src[cols],
+                    n_neighbors=args.knn_k,
+                    context=f"heatmap {title}",
+                )
                 corr_mat = data.corr(method="pearson")
                 mask_tri = np.triu(np.ones_like(corr_mat, dtype=bool))
                 sns.heatmap(
@@ -1744,6 +1835,7 @@ def main() -> None:
         inverse_table, inverse_ranges, inverse_summary = run_inverse_design(
             best_model=best_model,
             X_train=X_train,
+            X_condition=X_train_raw,
             y_train_orig=y_train_orig,
             target_rates=targets,
             pollutant_col=str(args.inverse_pollutant_col),

@@ -1,0 +1,39 @@
+{
+  "enabled": true,
+  "pollutant_column": "Types of contaminants",
+  "pollutants_requested": [
+    "Sulfamethoxazole"
+  ],
+  "controllable_columns": [
+    "MB MWCO (Da)",
+    "Pressure (kPa)",
+    "MB pore radius rp (nm)"
+  ],
+  "targets": [
+    90.0,
+    95.0
+  ],
+  "n_candidates_sampled_per_pollutant": 2000,
+  "topk_per_target": 5,
+  "confidence_level": 0.8,
+  "best_recommendations": [
+    {
+      "pollutant_input": "Sulfamethoxazole",
+      "target_removal_rate": 90.0,
+      "predicted_removal_rate": 90.00039114629757,
+      "abs_error_to_target": 0.0003911462975736413,
+      "plausibility_score": 0.6023058122247466
+    },
+    {
+      "pollutant_input": "Sulfamethoxazole",
+      "target_removal_rate": 95.0,
+      "predicted_removal_rate": 95.01435871856692,
+      "abs_error_to_target": 0.014358718566924722,
+      "plausibility_score": 0.4826516210650576
+    }
+  ],
+  "training_target_range": [
+    0.0,
+    100.0
+  ]
+}

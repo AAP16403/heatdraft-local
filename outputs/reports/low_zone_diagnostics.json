@@ -1,7 +1,7 @@
 {
   "low_rows": 149,
-  "false_high_rate": 0.4228187919463087,
-  "mean_overprediction": 23.995825352159034,
-  "low_rmse": 31.943005393332534,
-  "low_mae": 24.575451738262434
+  "false_high_rate": 0.5704697986577181,
+  "mean_overprediction": 27.424069630444563,
+  "low_rmse": 37.41944814181669,
+  "low_mae": 28.173315908062634
 }
