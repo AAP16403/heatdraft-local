@@ -2,7 +2,7 @@ clearvars -except NaturePaper cfgOverride
 clc
 
 
-cfg = struct();
+cfg = struct()
 cfg.seed = 42;
 cfg.holdoutFraction = 0.20;
 

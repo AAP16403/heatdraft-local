@@ -1,13 +1,13 @@
 feature,high_train_median,low_median,abs_gap
-WS_mg_L_,553,1000,447
-Pressure_kPa_,700,552,148
-RMS_roughness__nm_,60.2,9,51.2
-MeasurementTime_min_,30,10,20
-MBSurfaceEnergy__m_J_m_2_,42.7820541164858,46.5075996595051,3.7255455430193
-pKa1,5.41,7.8,2.39
-SurfaceTension_s_dyne_cm_1_,53,51,2
-InitialConcentrationOfCompound_mg_L_,0.725,0.253124,0.471876
-MinProjection___,4.325,3.925,0.399999999999999
-CompoundLogKOw,1.682,1.284,0.398
-E,1.5,1.12,0.38
-B,1.24,0.895,0.345
+"WS (mg/L)",553,1000,447
+"Pressure (kPa)",700,552,148
+"RMS roughness (nm)",60.2,9,51.2
+"Measurement time (min)",30,10,20
+"MB surface energy, γm (J·m-2)",42.7820541164858,46.5075996595051,3.7255455430193
+"pKa1",5.41,7.8,2.39
+"Surface tension γs (dyne·cm-1)",53,51,2
+"Initial concentration of compound (mg/L)",0.725,0.253124,0.471876
+"Min projection (Å)",4.325,3.925,0.399999999999999
+"Compound log K ow",1.682,1.284,0.398
+"E",1.5,1.12,0.38
+"B",1.24,0.895,0.345

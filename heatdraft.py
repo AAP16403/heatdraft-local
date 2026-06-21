@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 import pickle
 import re
@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import optuna
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 import seaborn as sns
 import xgboost as xgb
 from rdkit import Chem
@@ -148,11 +149,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Optional explicit list of controllable filter-property columns for inverse design.",
     )
-    parser.add_argument(
-        "--inverse-auto-controllables",
-        action="store_true",
-        help="Allow inverse design to auto-pick numeric controllables if none are provided.",
-    )
+
     parser.add_argument(
         "--inverse-confidence",
         type=float,
@@ -426,7 +423,7 @@ def add_rdkit_descriptors(df: pd.DataFrame) -> pd.DataFrame:
     mols = df[smiles_col].apply(lambda x: Chem.MolFromSmiles(x) if isinstance(x, str) and x.strip() else None)
 
     for feat, fn in descriptor_fns.items():
-        df[feat] = mols.apply(lambda m: fn(m) if m is not None else np.nan)
+        df[feat] = mols.apply(lambda m, _fn=fn: _fn(m) if m is not None else np.nan)
 
     valid = mols.notna().mean() * 100.0
     print(f"RDKit descriptors added from '{smiles_col}' (valid SMILES: {valid:.1f}%).")
@@ -925,11 +922,8 @@ def _resolve_controllable_columns(
     X_train: pd.DataFrame,
     pollutant_col: str,
     user_cols: List[str],
-    allow_auto: bool,
 ) -> List[str]:
     if not user_cols:
-        if not allow_auto:
-            raise RuntimeError("Provide --inverse-controllable-cols explicitly. Auto fallback is disabled.")
         numeric_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
         cols = [c for c in numeric_cols if c != pollutant_col]
         if not cols:
@@ -1035,7 +1029,6 @@ def run_inverse_design(
     confidence_level: float,
     risk_model: Optional[Dict[str, Any]],
     risk_weight: float,
-    allow_auto_controllables: bool,
     seed: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     if X_condition.empty:
@@ -1061,7 +1054,7 @@ def run_inverse_design(
         )
     pollutant_values = [str(v) for v in pollutant_values]
     controllable_cols = _resolve_controllable_columns(
-        X_train, pollutant_col, controllable_cols, allow_auto_controllables
+        X_train, pollutant_col, controllable_cols
     )
 
     conf = float(confidence_level)
@@ -1189,7 +1182,7 @@ def run_inverse_design(
         "low_risk_enabled": bool(risk_model is not None and float(risk_weight) > 0),
         "low_risk_weight": float(risk_weight),
         "low_risk_neighbors": int(risk_model["n_neighbors"]) if risk_model is not None else None,
-        "auto_controllables": bool(allow_auto_controllables),
+
         "best_recommendations": best_rows,
         "training_target_range": [
             float(np.nanmin(y_train_orig.to_numpy(dtype=float))),
@@ -1324,58 +1317,110 @@ def run_app(bundle_path: str) -> None:
     default_risk_weight = float(bundle.get("inverse_low_risk_weight", 15.0))
     default_risk_k = int(bundle.get("inverse_low_risk_k", 25))
 
-    print("\nHeatDraft Inverse-Design App")
-    print("Type 'quit' to exit.\n")
-    print(f"Target column: {target_col}")
-    print(f"High-performance threshold: {high_threshold}")
-    print(f"Selected features: {len(X_train.columns)}")
+    num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+    all_raw_cols = X_train_raw.columns.tolist()
+    cat_cols = [c for c in all_raw_cols if c not in num_cols]
 
+    # ── Startup Banner ──
+    print("\n" + "=" * 60)
+    print("   HeatDraft Inverse-Design App")
+    print("=" * 60)
+    print(f"  Target column       : {target_col}")
+    print(f"  High-perf threshold : {high_threshold}")
+    print(f"  Training rows       : {X_train.shape[0]}")
+    print(f"  Selected features   : {X_train.shape[1]}")
+    y_arr = y_train_orig.to_numpy(dtype=float)
+    print(f"  Target range        : [{np.nanmin(y_arr):.2f}, {np.nanmax(y_arr):.2f}]")
+    print(f"  Default targets     : {default_targets}")
+    print("-" * 60)
+    print("  Available numeric columns:")
+    for i, c in enumerate(num_cols):
+        print(f"    {i+1:3d}. {c}")
+    if cat_cols:
+        print(f"  Categorical columns : {cat_cols}")
+    print("-" * 60)
+    print("  Type 'quit', 'exit', or 'q' at any prompt to exit.\n")
+
+    session_num = 0
     while True:
-        raw_col = input(f"Pollutant column [{default_pollutant_col}]: ").strip()
+        session_num += 1
+        if session_num > 1:
+            print("\n" + "=" * 60)
+            print(f"   Session {session_num}")
+            print("=" * 60)
+
+        # ── Pollutant Column ──
+        print(f"\n  Default pollutant column: '{default_pollutant_col}'")
+        if cat_cols:
+            print(f"  Available categorical columns:")
+            for i, c in enumerate(cat_cols):
+                print(f"    {i+1:3d}. {c}")
+        raw_col = input(f"  Pollutant column [Enter for '{default_pollutant_col}']: ").strip()
         if raw_col.lower() in {"quit", "exit", "q"}:
             break
         pollutant_col = raw_col or default_pollutant_col
-        resolved_col = resolve_column_name(X_train_raw.columns.tolist(), [pollutant_col])
+        resolved_col = resolve_column_name(all_raw_cols, [pollutant_col])
         if resolved_col is None:
-            print("Pollutant column not found in training data.")
+            print(f"  [ERROR] Column '{pollutant_col}' not found. Try again.")
             continue
         pollutant_col = resolved_col
+
+        # ── Pollutant Values ──
         freq_vals = (
             X_train_raw[pollutant_col]
             .astype(str)
             .value_counts()
-            .head(5)
+            .head(8)
             .index
             .tolist()
         )
-        raw_pollutants = input(f"Pollutant values (comma, default {freq_vals[:3]}): ").strip()
+        print(f"\n  Values found in '{pollutant_col}':")
+        for i, v in enumerate(freq_vals):
+            cnt = int((X_train_raw[pollutant_col].astype(str) == v).sum())
+            print(f"    {i+1:3d}. {v}  ({cnt} rows)")
+        raw_pollutants = input(f"  Pollutant values [Enter for top {min(3, len(freq_vals))}]: ").strip()
         if raw_pollutants.lower() in {"quit", "exit", "q"}:
             break
         pollutants = _parse_csv_tokens(raw_pollutants) or [str(v) for v in freq_vals[:3]]
 
-        raw_targets = input(f"Target removal rates (comma, default {default_targets}): ").strip()
+        # ── Target Removal Rates ──
+        raw_targets = input(f"  Target removal rates [Enter for {default_targets}]: ").strip()
         if raw_targets.lower() in {"quit", "exit", "q"}:
             break
         targets = _parse_float_tokens(raw_targets) or [float(v) for v in default_targets]
+        invalid_targets = [t for t in targets if t < 0.0 or t > 100.0]
+        if invalid_targets:
+            print(f"  [ERROR] Targets must be in [0, 100]. Invalid: {invalid_targets}")
+            continue
 
-        raw_controllables = input("Controllable columns (comma, blank for auto): ").strip()
+        # ── Controllable Columns ──
+        print(f"\n  Available controllable (numeric) columns:")
+        for i, c in enumerate(num_cols):
+            print(f"    {i+1:3d}. {c}")
+        raw_controllables = input("  Controllable columns [Enter for auto-select]: ").strip()
         if raw_controllables.lower() in {"quit", "exit", "q"}:
             break
         controllables = _parse_csv_tokens(raw_controllables)
         if not controllables:
-            num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
             if len(num_cols) > 12:
                 variances = X_train[num_cols].var().sort_values(ascending=False)
                 controllables = variances.head(12).index.tolist()
             else:
-                controllables = num_cols
-            print(f"Auto controllables: {controllables}")
+                controllables = list(num_cols)
+            print(f"  Auto-selected {len(controllables)} columns.")
 
-        raw_weight = input(f"Low-risk weight (default {default_risk_weight}): ").strip()
+        # ── Low-Risk Weight ──
+        raw_weight = input(f"  Low-risk weight [Enter for {default_risk_weight}]: ").strip()
         if raw_weight.lower() in {"quit", "exit", "q"}:
             break
-        risk_weight = float(raw_weight) if raw_weight else default_risk_weight
+        try:
+            risk_weight = float(raw_weight) if raw_weight else default_risk_weight
+        except ValueError:
+            print(f"  [ERROR] Invalid number: '{raw_weight}'. Using default {default_risk_weight}.")
+            risk_weight = default_risk_weight
+
         if risk_model is None:
+            print("  Building low-risk model (first run)...")
             risk_model = build_low_risk_model(
                 X_train=X_train,
                 y_train_orig=y_train_orig,
@@ -1384,36 +1429,73 @@ def run_app(bundle_path: str) -> None:
                 n_neighbors=default_risk_k,
             )
 
-        inverse_table, inverse_ranges, summary = run_inverse_design(
-            best_model=best_model,
-            X_train=X_train,
-            X_condition=X_train_raw,
-            y_train_orig=y_train_orig,
-            target_rates=targets,
-            pollutant_col=pollutant_col,
-            pollutant_values=pollutants,
-            controllable_cols=controllables,
-            n_samples=12000,
-            topk=12,
-            confidence_level=0.8,
-            risk_model=risk_model,
-            risk_weight=risk_weight,
-            allow_auto_controllables=False,
-            seed=42,
-        )
+        # ── Summary Before Running ──
+        print("\n" + "-" * 60)
+        print("  Running inverse design with:")
+        print(f"    Pollutant column  : {pollutant_col}")
+        print(f"    Pollutant values  : {pollutants}")
+        print(f"    Target rates      : {targets}")
+        print(f"    Controllable cols : {len(controllables)} columns")
+        print(f"    Low-risk weight   : {risk_weight}")
+        print("-" * 60)
 
-        print("\nInverse recommendations (top rows):")
+        try:
+            inverse_table, inverse_ranges, summary = run_inverse_design(
+                best_model=best_model,
+                X_train=X_train,
+                X_condition=X_train_raw,
+                y_train_orig=y_train_orig,
+                target_rates=targets,
+                pollutant_col=pollutant_col,
+                pollutant_values=pollutants,
+                controllable_cols=controllables,
+                n_samples=12000,
+                topk=12,
+                confidence_level=0.8,
+                risk_model=risk_model,
+                risk_weight=risk_weight,
+                seed=42,
+            )
+        except Exception as exc:
+            print(f"\n  [ERROR] Inverse design failed: {exc}")
+            print("  Please adjust your inputs and try again.")
+            continue
+
+        # ── Formatted Results ──
+        print("\n" + "=" * 60)
+        print("   RESULTS")
+        print("=" * 60)
+
         if inverse_table.empty:
-            print("No recommendations generated.")
+            print("  No recommendations generated.")
         else:
+            print(f"\n  Top Recommendations ({len(inverse_table)} candidates):")
             print(inverse_table.head(12).to_string(index=False))
-        print("\nInverse parameter ranges (top rows):")
-        if inverse_ranges.empty:
-            print("No ranges generated.")
-        else:
+
+            # Best recommendation card
+            best_recs = summary.get("best_recommendations", [])
+            if best_recs:
+                print("\n  " + "-" * 56)
+                print("  BEST RECOMMENDATIONS:")
+                for rec in best_recs:
+                    print(f"    Pollutant: {rec.get('pollutant_input', '?')}")
+                    print(f"      Target  : {rec.get('target_removal_rate', '?'):.1f}%")
+                    print(f"      Predicted: {rec.get('predicted_removal_rate', '?'):.2f}%")
+                    print(f"      Error   : {rec.get('abs_error_to_target', '?'):.3f}")
+                    print(f"      Plausibility: {rec.get('plausibility_score', '?'):.4f}")
+                    if rec.get("composite_score") is not None:
+                        print(f"      Composite: {rec['composite_score']:.4f}")
+                print("  " + "-" * 56)
+
+        if not inverse_ranges.empty:
+            print(f"\n  Parameter Ranges ({len(inverse_ranges)} entries):")
             print(inverse_ranges.head(12).to_string(index=False))
-        print("\nSummary:")
-        print(json.dumps(summary, indent=2))
+
+        print("\n  Full summary:")
+        print(json.dumps(summary, indent=2, default=str))
+        print("\n" + "=" * 60)
+
+    print("\nGoodbye!")
 
 
 class KMeansMoERegressor:
@@ -1994,6 +2076,39 @@ def main() -> None:
         plt.savefig(heatmap_path, dpi=160, bbox_inches="tight")
         plt.close()
 
+    mi_path = None
+    if not args.no_feature_drop:
+        num_X = knn_impute_numeric_frame(
+            X_train.select_dtypes(include=[np.number]),
+            n_neighbors=args.knn_k,
+            context="mutual information",
+        )
+        if num_X.shape[1] > 0:
+            mi_scores = mutual_info_regression(num_X.values, y_train_orig.values, random_state=42)
+            mi_df = pd.DataFrame({"feature": num_X.columns, "MI": mi_scores})
+            mi_df = mi_df.sort_values("MI", ascending=True)
+
+            fig_mi, ax_mi = plt.subplots(figsize=(10, max(6, len(mi_df) * 0.35)))
+            colors_mi = ["#1565C0" if s > mi_df["MI"].median() else "#90CAF9" for s in mi_df["MI"]]
+            ax_mi.barh(
+                mi_df["feature"],
+                mi_df["MI"],
+                color=colors_mi,
+                edgecolor="black",
+                linewidth=0.4,
+            )
+            ax_mi.axvline(mi_df["MI"].median(), color="red", linestyle="--", linewidth=1, label="Median MI")
+            ax_mi.set(
+                xlabel="Mutual Information Score",
+                title="Feature Importance (Mutual Information with Target)\nAfter Feature Dropping",
+            )
+            ax_mi.legend(fontsize=9)
+            ax_mi.grid(axis="x", alpha=0.3)
+            plt.tight_layout()
+            mi_path = figures_dir / "mutual_information.png"
+            plt.savefig(mi_path, dpi=160, bbox_inches="tight")
+            plt.close()
+
     test_low_mask = y_test_orig < args.high_threshold
     X_low = X_test.loc[test_low_mask]
     y_low = y_test_orig.loc[test_low_mask]
@@ -2071,64 +2186,96 @@ def main() -> None:
             file_path=str(args.inverse_pollutants_file),
         )
 
-        inverse_table, inverse_ranges, inverse_summary = run_inverse_design(
-            best_model=best_model,
-            X_train=X_train,
-            X_condition=X_train_raw,
-            y_train_orig=y_train_orig,
-            target_rates=targets,
-            pollutant_col=str(args.inverse_pollutant_col),
-            pollutant_values=pollutant_values,
-            controllable_cols=[str(c) for c in args.inverse_controllable_cols],
-            n_samples=max(2000, int(args.inverse_samples)),
-            topk=max(1, int(args.inverse_topk)),
-            confidence_level=float(args.inverse_confidence),
-            risk_model=low_risk_model,
-            risk_weight=float(args.inverse_low_risk_weight),
-            allow_auto_controllables=bool(args.inverse_auto_controllables),
-            seed=args.seed + 313,
-        )
-        inverse_design_path = data_dir / "inverse_design_recommendations.csv"
-        inverse_table.to_csv(inverse_design_path, index=False)
-        inverse_ranges_path = data_dir / "inverse_parameter_ranges.csv"
-        inverse_ranges.to_csv(inverse_ranges_path, index=False)
+        # --- Auto-resolve inverse-design parameters (no interactive prompts) ---
+        resolved_pollutant_col = resolve_column_name(X_train_raw.columns.tolist(), [str(args.inverse_pollutant_col)])
+        if resolved_pollutant_col is None:
+            print(f"  [WARN] Pollutant column '{args.inverse_pollutant_col}' not found — skipping inverse design.")
+            print(f"  Use --inverse-pollutant-col to specify a valid column.")
+            args.disable_inverse = True
 
-        inverse_summary_path = reports_dir / "inverse_design_summary.json"
-        inverse_summary_path.write_text(json.dumps(inverse_summary, indent=2), encoding="utf-8")
+        if not args.disable_inverse:
+            if not pollutant_values:
+                p_col = resolve_column_name(X_train_raw.columns.tolist(), [str(args.inverse_pollutant_col)])
+                if p_col is not None:
+                    freq_vals = X_train_raw[p_col].astype(str).value_counts().head(3).index.tolist()
+                    pollutant_values = [str(v) for v in freq_vals]
+                    print(f"  Auto-selected pollutant values: {pollutant_values}")
 
-        fig_inv, ax_inv = plt.subplots(figsize=(10, 7))
-        pollutant_vals = inverse_table["pollutant_input"].astype(str).unique().tolist()
-        cmap = sns.color_palette("viridis", n_colors=max(3, len(pollutant_vals)))
-        for i, pol in enumerate(pollutant_vals):
-            s = inverse_table[inverse_table["pollutant_input"].astype(str) == str(pol)]
-            if s.empty:
-                continue
-            ax_inv.scatter(
-                s["predicted_removal_rate"],
-                s["plausibility_score"],
-                s=42 + 10 * (s["rank"].max() - s["rank"] + 1),
-                alpha=0.8,
-                color=cmap[i],
-                label=f"{pol}",
-                edgecolor="black",
-                linewidth=0.3,
+            controllable_cols_cli = [str(c) for c in args.inverse_controllable_cols]
+            if not controllable_cols_cli:
+                num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+                controllable_cols_cli = num_cols
+                print(f"  Auto-selected {len(controllable_cols_cli)} controllable columns (all numeric).")
+
+            # --- Summary before running ---
+            print("\n" + "-" * 60)
+            print("  Inverse design configuration:")
+            print(f"    Pollutant column  : {args.inverse_pollutant_col}")
+            print(f"    Pollutant values  : {pollutant_values}")
+            print(f"    Target rates      : {targets}")
+            print(f"    Controllable cols : {len(controllable_cols_cli)} columns")
+            print(f"    Candidates/sample : {max(2000, int(args.inverse_samples))}")
+            print(f"    Top-k per target  : {max(1, int(args.inverse_topk))}")
+            print(f"    Risk weight       : {float(args.inverse_low_risk_weight)}")
+            print("-" * 60)
+
+            inverse_table, inverse_ranges, inverse_summary = run_inverse_design(
+                best_model=best_model,
+                X_train=X_train,
+                X_condition=X_train_raw,
+                y_train_orig=y_train_orig,
+                target_rates=targets,
+                pollutant_col=str(args.inverse_pollutant_col),
+                pollutant_values=pollutant_values,
+                controllable_cols=controllable_cols_cli,
+                n_samples=max(2000, int(args.inverse_samples)),
+                topk=max(1, int(args.inverse_topk)),
+                confidence_level=float(args.inverse_confidence),
+                risk_model=low_risk_model,
+                risk_weight=float(args.inverse_low_risk_weight),
+                seed=args.seed + 313,
             )
-            best = s.nsmallest(1, "abs_error_to_target").iloc[0]
-            ax_inv.text(
-                float(best["predicted_removal_rate"]) + 0.05,
-                float(best["plausibility_score"]),
-                f"best t={best['target_removal_rate']:.1f}%",
-                fontsize=8,
-            )
-        ax_inv.set_title("Inverse Design Candidates by Pollutant")
-        ax_inv.set_xlabel("Predicted Removal Rate (%)")
-        ax_inv.set_ylabel("Plausibility Score (higher is closer to training manifold)")
-        ax_inv.grid(alpha=0.25)
-        ax_inv.legend(title="Pollutant", loc="best", fontsize=9)
-        plt.tight_layout()
-        inverse_plot_path = figures_dir / "inverse_design_candidates.png"
-        plt.savefig(inverse_plot_path, dpi=170, bbox_inches="tight")
-        plt.close()
+            inverse_design_path = data_dir / "inverse_design_recommendations.csv"
+            inverse_table.to_csv(inverse_design_path, index=False)
+            inverse_ranges_path = data_dir / "inverse_parameter_ranges.csv"
+            inverse_ranges.to_csv(inverse_ranges_path, index=False)
+
+            inverse_summary_path = reports_dir / "inverse_design_summary.json"
+            inverse_summary_path.write_text(json.dumps(inverse_summary, indent=2), encoding="utf-8")
+
+            fig_inv, ax_inv = plt.subplots(figsize=(10, 7))
+            pollutant_vals = inverse_table["pollutant_input"].astype(str).unique().tolist()
+            cmap = sns.color_palette("viridis", n_colors=max(3, len(pollutant_vals)))
+            for i, pol in enumerate(pollutant_vals):
+                s = inverse_table[inverse_table["pollutant_input"].astype(str) == str(pol)]
+                if s.empty:
+                    continue
+                ax_inv.scatter(
+                    s["predicted_removal_rate"],
+                    s["plausibility_score"],
+                    s=42 + 10 * (s["rank"].max() - s["rank"] + 1),
+                    alpha=0.8,
+                    color=cmap[i],
+                    label=f"{pol}",
+                    edgecolor="black",
+                    linewidth=0.3,
+                )
+                best = s.nsmallest(1, "abs_error_to_target").iloc[0]
+                ax_inv.text(
+                    float(best["predicted_removal_rate"]) + 0.05,
+                    float(best["plausibility_score"]),
+                    f"best t={best['target_removal_rate']:.1f}%",
+                    fontsize=8,
+                )
+            ax_inv.set_title("Inverse Design Candidates by Pollutant")
+            ax_inv.set_xlabel("Predicted Removal Rate (%)")
+            ax_inv.set_ylabel("Plausibility Score (higher is closer to training manifold)")
+            ax_inv.grid(alpha=0.25)
+            ax_inv.legend(title="Pollutant", loc="best", fontsize=9)
+            plt.tight_layout()
+            inverse_plot_path = figures_dir / "inverse_design_candidates.png"
+            plt.savefig(inverse_plot_path, dpi=170, bbox_inches="tight")
+            plt.close()
 
     predictions_path = data_dir / "test_predictions.csv"
     test_predictions.reset_index(drop=True).to_csv(predictions_path, index=False)
@@ -2202,6 +2349,8 @@ def main() -> None:
     }
     if heatmap_path:
         artifacts["figures"]["correlation_heatmap"] = str(heatmap_path)
+    if mi_path:
+        artifacts["figures"]["mutual_information"] = str(mi_path)
     if gap_plot_path:
         artifacts["figures"]["feature_gaps"] = str(gap_plot_path)
     if vif_table_path:

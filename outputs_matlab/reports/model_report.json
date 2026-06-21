@@ -1,6 +1,6 @@
 {
   "input_source": "F:\\heatdraft local\\Nature paper.xlsx",
-  "target": "RemovalRate___",
+  "target": "Removal rate (%)",
   "high_threshold": 90,
   "rows_total": 1501,
   "rows_train": 1201,
@@ -14,20 +14,20 @@
   "train_rows_used_for_model": 1201,
   "categorical_filter": {
     "dropped_columns": [
-      "NameOfMB",
-      "TypesOfContaminants",
+      "Name of MB",
+      "Types of contaminants",
       "CAS",
       "SMILES"
     ],
     "details": [
       {
-        "column": "NameOfMB",
+        "column": "Name of MB",
         "n_unique_train": 44,
         "unique_ratio_train": 0.036636136552872609,
         "id_like": true
       },
       {
-        "column": "TypesOfContaminants",
+        "column": "Types of contaminants",
         "n_unique_train": 168,
         "unique_ratio_train": 0.1398834304746045,
         "id_like": false
@@ -54,20 +54,20 @@
     "sparsity_dropped": [],
     "nzv_dropped": [],
     "correlation_dropped": [
-      "CompoundMw_g_mol_",
-      "logD_pH_7_4_",
+      "Compound Mw (g/mol)",
+      "log D (pH=7.4)",
       "MinPartialCharge",
-      "MaxProjection___",
-      "MBMWCO_Da_",
-      "MBSurfaceChargeDensity__m_mC_m_2_"
+      "Max projection (Å)",
+      "MB MWCO (Da)",
+      "MB surface charge density , σm (mC·m-2)"
     ],
     "vif_dropped": [
-      "rs_rp",
+      "rs/rp",
       "V",
-      "MBVolumeChargeDensity__m_mol_m_3_",
-      "CompoundStokesRadiusRs_nm_",
-      "TotalCharge",
-      "CompoundSize_nm_"
+      "MB volume charge density, δm (mol·m-3)",
+      "Compound stokes radius rs (nm)",
+      "Total charge",
+      "Compound size (nm)"
     ]
   },
   "moe_report": {
