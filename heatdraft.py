@@ -992,8 +992,16 @@ def _sample_inverse_candidates(
             s = pd.to_numeric(base_pool[col], errors="coerce")
             q05 = float(s.quantile(0.05))
             q95 = float(s.quantile(0.95))
-            if np.isfinite(q05) and np.isfinite(q95) and q95 > q05:
-                vals = rng.uniform(q05, q95, size=n_samples)
+            if not (np.isfinite(q05) and np.isfinite(q95)):
+                s_full = pd.to_numeric(X_ref[col], errors="coerce")
+                q05 = float(s_full.quantile(0.05))
+                q95 = float(s_full.quantile(0.95))
+                
+            if np.isfinite(q05) and np.isfinite(q95):
+                if q95 > q05:
+                    vals = rng.uniform(q05, q95, size=n_samples)
+                else:
+                    vals = np.full(n_samples, q05)
             else:
                 raise RuntimeError(
                     f"Inverse candidate generation failed: invalid numeric range for controllable '{col}'."
