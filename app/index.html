@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="HeatDraft - Membrane Contaminant Removal Rate Prediction App powered by experimental data from Nature paper dataset.">
+  <title>HeatDraft | Membrane Removal Rate Predictor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="badge">Powered by 1,501 Experimental Records</div>
+      <h1>HeatDraft Predictor</h1>
+      <p>Reverse-engineer membrane contaminant removal rates from any available input. 
+         Select a contaminant, membrane, or both — and get instant predictions backed by real experimental data.</p>
+    </header>
+
+    <!-- Main Layout -->
+    <div class="main-grid">
+
+      <!-- Left Panel: Inputs -->
+      <div class="card" style="position:sticky; top:24px;">
+        <div class="card-title"><div class="icon">⚙️</div> Configuration</div>
+
+        <div class="form-group">
+          <label for="contaminant-select">Contaminant</label>
+          <select id="contaminant-select">
+            <option value="">— Select Contaminant —</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="membrane-select">Membrane</label>
+          <select id="membrane-select">
+            <option value="">— Select Membrane —</option>
+          </select>
+        </div>
+
+        <div class="separator"></div>
+
+        <div class="card-title" style="font-size:0.9rem; margin-top:12px;">
+          <div class="icon" style="width:26px;height:26px;font-size:0.8rem;">🎛️</div> 
+          Optional Conditions
+        </div>
+
+        <div class="input-row">
+          <div class="form-group">
+            <label for="pressure">Pressure (kPa)</label>
+            <input type="number" id="pressure" placeholder="e.g. 1000" step="any">
+          </div>
+          <div class="form-group">
+            <label for="ph">pH</label>
+            <input type="number" id="ph" placeholder="e.g. 7.0" step="0.1" min="0" max="14">
+          </div>
+        </div>
+
+        <div class="input-row">
+          <div class="form-group">
+            <label for="init-conc">Initial Conc. (mg/L)</label>
+            <input type="number" id="init-conc" placeholder="e.g. 100" step="any">
+          </div>
+          <div class="form-group">
+            <label for="time">Time (min)</label>
+            <input type="number" id="time" placeholder="e.g. 60" step="any">
+          </div>
+        </div>
+
+        <button class="btn-predict" onclick="predict()">
+          🚀 Predict Removal Rate
+        </button>
+      </div>
+
+      <!-- Right Panel: Results -->
+      <div id="results-area" class="results-area">
+        <div class="card empty-state">
+          <div class="icon">🧬</div>
+          <h3>Configure & Predict</h3>
+          <p>Select a contaminant and/or membrane from the left panel, then click Predict to see the results.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app_data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
