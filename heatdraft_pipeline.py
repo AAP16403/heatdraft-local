@@ -804,6 +804,7 @@ if __name__ == "__main__":
         batch_size = 32
         early_stopping_patience = 300
         best_val_loss = float('inf')
+        previous_val_loss = float('inf')
         patience_counter = 0
 
         X, y = load_and_prep_data("heatdraft_dataset_ready.csv")
@@ -853,17 +854,22 @@ if __name__ == "__main__":
                 
             scheduler.step(val_loss)
             
-            # Early stopping logic
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Early stopping logic (working in tandem with shifting learning rate)
+            if val_loss < previous_val_loss:
                 patience_counter = 0
-                torch.save(final_model.state_dict(), "best_final_model.pth")
             else:
                 patience_counter += 1
                 
+            previous_val_loss = val_loss
+            
+            # Still save the absolute best weights for the final time-machine load!
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(final_model.state_dict(), "best_final_model.pth")
+                
             # Print progress every 50 epochs
             if (epoch + 1) % 50 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f} | Patience: {patience_counter}/{early_stopping_patience}")
+                print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {avg_loss:.4f} | Val Loss: {val_loss:.4f} | Best Val: {best_val_loss:.4f} | Patience: {patience_counter}/{early_stopping_patience}")
 
             if patience_counter >= early_stopping_patience:
                 print(f"\nEarly stopping triggered at epoch {epoch+1}! Best Val Loss: {best_val_loss:.4f}")
