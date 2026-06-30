@@ -497,6 +497,12 @@ def prepare_for_nn(df):
     # 2. Separate numeric from categorical
     num_cols = df.select_dtypes(include=[np.number]).columns
 
+    # 2.5 Feature Engineering: Steric Hindrance Ratio
+    print("Engineering Steric Hindrance Ratio feature...")
+    if "Compound size (nm)" in df.columns and "MB pore radius rp (nm)" in df.columns:
+        safe_pore = np.where(df["MB pore radius rp (nm)"] == 0, 1e-6, df["MB pore radius rp (nm)"])
+        df["Steric_Hindrance_Ratio"] = df["Compound size (nm)"] / safe_pore
+
     # 3. Strict Data Completeness (Drop rows with missing values)
     # Ensure the model only learns from perfectly complete rows rather than using imputation.
     # Since pKa2 was safely handled above, this mainly drops rows missing pKa1 or experimental conditions.
@@ -689,7 +695,7 @@ def objective(trial):
     n_heads = trial.suggest_categorical("n_heads", [2, 4, 8])
     num_layers = trial.suggest_int("num_layers", 1, 3)
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    dropout = trial.suggest_float("dropout", 0.05, 0.4)
+    dropout = trial.suggest_float("dropout", 0.20, 0.50)
     epochs = 150
     batch_size = 64
 
@@ -719,7 +725,7 @@ def objective(trial):
         dropout=dropout,
     ).to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.MSELoss()
 
     # Training Loop
@@ -827,7 +833,7 @@ if __name__ == "__main__":
         ).to(device)
 
         # We will use ReduceLROnPlateau to help the model converge
-        optimizer = optim.Adam(final_model.parameters(), lr=best_params["lr"])
+        optimizer = optim.Adam(final_model.parameters(), lr=best_params["lr"], weight_decay=1e-4)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=10
         )
