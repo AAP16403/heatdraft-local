@@ -898,6 +898,70 @@ if __name__ == "__main__":
         print("=" * 50)
         print(f"Train MSE: {train_mse:.4f} | Train R2: {train_r2:.4f}")
         print(f"Test MSE:  {test_mse:.4f} | Test R2:  {test_r2:.4f}")
+        
+        # Plot Predicted vs Actual
+        plt.figure(figsize=(8, 8))
+        plt.scatter(y_test, test_preds, alpha=0.5, color='royalblue', edgecolors='k')
+        plt.plot([0, 100], [0, 100], 'r--', lw=2) # Perfect prediction line
+        plt.title(f"Predicted vs Actual Removal Rate\nTest R² = {test_r2:.4f} | RMSE = {np.sqrt(test_mse):.2f}%", fontsize=14)
+        plt.xlabel("Actual Removal Rate (%)", fontsize=12)
+        plt.ylabel("Predicted Removal Rate (%)", fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        os.makedirs("visualizations", exist_ok=True)
+        plt.savefig("visualizations/5_predicted_vs_actual.png", dpi=300)
+        plt.close()
+        print("Saved final Predicted vs Actual plot to 'visualizations/5_predicted_vs_actual.png'")
+
+        # Calculate Permutation Feature Importance
+        print("Calculating Permutation Feature Importance...")
+        df_cols = pd.read_csv("heatdraft_dataset_ready.csv")
+        target_col = [c for c in df_cols.columns if "removal" in str(c).lower() and "rate" in str(c).lower()][0]
+        feature_names = df_cols.drop(columns=[target_col]).columns.tolist()
+
+        baseline_mse = test_mse
+        importances = []
+        for i in range(X_test.shape[1]):
+            X_test_shuffled = X_test.copy()
+            np.random.shuffle(X_test_shuffled[:, i])
+            with torch.no_grad():
+                shuffled_preds = final_model(torch.tensor(X_test_shuffled).to(device)).cpu().numpy()
+            shuffled_preds = np.clip(shuffled_preds, 0.0, 100.0)
+            shuf_mse = mean_squared_error(y_test, shuffled_preds)
+            importances.append(shuf_mse - baseline_mse)
+
+        # Plot Top 15 Feature Importances
+        imp_indices = np.argsort(importances)[::-1][:15]
+        top_features = [feature_names[i] for i in imp_indices]
+        top_importances = [importances[i] for i in imp_indices]
+
+        plt.figure(figsize=(10, 8))
+        sns.barplot(x=top_importances, y=top_features, palette="viridis")
+        plt.title("Top 15 Feature Importances (Permutation)", fontsize=14)
+        plt.xlabel("Increase in MSE when feature is shuffled", fontsize=12)
+        plt.tight_layout()
+        plt.savefig("visualizations/6_feature_importance.png", dpi=300)
+        plt.close()
+        print("Saved Feature Importance plot to 'visualizations/6_feature_importance.png'")
+
+        # Error Analysis: What makes the model erratic?
+        print("Analyzing erratic predictions...")
+        errors = np.abs(test_preds - y_test)
+        
+        # Plot Error vs Top 3 Important Features
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        for idx, imp_idx in enumerate(imp_indices[:3]):
+            feature_name = feature_names[imp_idx]
+            feature_vals = X_test[:, imp_idx]
+            axes[idx].scatter(feature_vals, errors, alpha=0.5, color='crimson')
+            axes[idx].set_title(f"Error vs {feature_name[:15]}")
+            axes[idx].set_xlabel("Feature Value")
+            axes[idx].set_ylabel("Absolute Prediction Error (%)")
+            
+        plt.tight_layout()
+        plt.savefig("visualizations/7_error_analysis.png", dpi=300)
+        plt.close()
+        print("Saved Error Analysis plot to 'visualizations/7_error_analysis.png'")
 
     else:
         print(f"Dataset not found at {dataset_path}")
