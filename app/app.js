@@ -122,32 +122,32 @@ function predict() {
   // Take top 15 closest neighbors
   const matches = scoredRecords.slice(0, 15);
 
-  // Predict Removal Rate using K-Nearest Neighbors weighted average
-  let predictedRemoval = null;
-  let confidence = 'low';
-
-  const validMatches = matches.filter(m => m['Removal rate (%)'] !== null);
-  if (validMatches.length > 0) {
-    let totalWeight = 0;
-    let weightedSum = 0;
-    
-    validMatches.forEach(m => {
-      // Weight is heavily biased towards highly similar records
-      const weight = Math.pow(m.similarity, 2);
-      weightedSum += m['Removal rate (%)'] * weight;
-      totalWeight += weight;
-    });
-    
-    predictedRemoval = totalWeight > 0 ? (weightedSum / totalWeight) : null;
-
-    // Confidence heuristic
-    const topSim = validMatches[0].similarity;
-    if (topSim > 0.9) confidence = 'high';
-    else if (topSim > 0.5) confidence = 'medium';
-    else confidence = 'low';
-  }
-
-  renderResults(predictedRemoval, confidence, contProfile, mbProfile, matches);
+  // Fetch prediction from the local PyTorch backend
+  fetch('http://localhost:8000/api/predict', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contName: contName,
+      mbName: mbName,
+      pressure: userPressure,
+      time: userTime,
+      conc: userInitConc,
+      ph: userPh
+    })
+  })
+  .then(response => response.json())
+  .then(data => {
+    if (data.error) {
+      alert("Backend Error: " + data.error);
+      return;
+    }
+    renderResults(data.predicted_removal, data.confidence, contProfile, mbProfile, matches);
+  })
+  .catch(err => {
+    console.error("PyTorch Backend offline.", err);
+    alert("Error: PyTorch Backend is offline. Please start server.py");
+    renderResults(null, 'Backend Offline', contProfile, mbProfile, matches);
+  });
 }
 
 function renderResults(predicted, confidence, contProfile, mbProfile, matches) {

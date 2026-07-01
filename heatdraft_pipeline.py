@@ -13,6 +13,7 @@ from sklearn.preprocessing import PowerTransformer
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import TensorDataset, DataLoader
 import json
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import optuna
@@ -452,6 +453,10 @@ def impute_diffusion_xgboost(df):
 
 def prepare_for_nn(df):
     print("\n--- Preparing Data for Neural Network Embedding ---")
+    
+    # Save a reference database of fully imputed properties (with Names/SMILES) 
+    # so the web server can look them up instantly without hitting PubChem.
+    df.to_csv("heatdraft_reference_database.csv", index=False)
 
     # 0. Drop ID, Metadata, and Text columns that cause data leakage
     drop_candidates = ["Number", "Reference", "CAS", "SMILES", "Name of MB"]
@@ -558,6 +563,9 @@ def prepare_for_nn(df):
 
     # Put transformed features back into the dataframe
     df[features_to_transform] = df_transformed
+    
+    # Save the fitted transformer for real-time inference
+    joblib.dump(pt, "power_transformer.pkl")
 
     print(
         f"Standardization complete. Zero missing values remaining. Dataset shape: {df.shape}"
@@ -665,9 +673,14 @@ def load_and_prep_data(filepath):
 
     # Fast encoding for remaining Categorical Columns
     cat_cols = features.select_dtypes(exclude=[np.number]).columns
+    label_encoders = {}
     for c in cat_cols:
         le = LabelEncoder()
         features[c] = le.fit_transform(features[c].astype(str))
+        label_encoders[c] = le
+        
+    joblib.dump(label_encoders, "label_encoders.pkl")
+    joblib.dump(list(features.columns), "feature_names.pkl")
 
     X = features.values.astype(np.float32)
     y = df[target_col].values.astype(np.float32)
