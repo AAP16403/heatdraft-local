@@ -675,6 +675,23 @@ def load_and_prep_data(filepath):
     return X, y
 
 
+class HighRatePenaltyLoss(nn.Module):
+    """
+    Custom Loss function that penalizes prediction errors more 
+    when the true removal rate is high.
+    Targets are assumed to be in the [0, 100] range.
+    """
+    def __init__(self, penalty_factor=1.5):
+        super().__init__()
+        self.penalty_factor = penalty_factor
+
+    def forward(self, preds, targets):
+        mse = (preds - targets) ** 2
+        # Scale weights linearly from 1.0 (at 0%) to penalty_factor (at 100%)
+        weights = 1.0 + (targets / 100.0) * (self.penalty_factor - 1.0)
+        return (weights * mse).mean()
+
+
 # --- OPTUNA OBJECTIVE ---
 def objective(trial):
     """
@@ -726,7 +743,7 @@ def objective(trial):
     ).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-    criterion = nn.MSELoss()
+    criterion = HighRatePenaltyLoss(penalty_factor=1.5)
 
     # Training Loop
     for epoch in range(epochs):
@@ -837,7 +854,7 @@ if __name__ == "__main__":
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=10
         )
-        criterion = nn.MSELoss()
+        criterion = HighRatePenaltyLoss(penalty_factor=1.5)
 
         for epoch in range(epochs):
             final_model.train()
@@ -905,6 +922,19 @@ if __name__ == "__main__":
         print(f"Train MSE: {train_mse:.4f} | Train R2: {train_r2:.4f}")
         print(f"Test MSE:  {test_mse:.4f} | Test R2:  {test_r2:.4f}")
         
+        high_mask = y_test >= 80.0
+        if np.sum(high_mask) > 0:
+            high_test_preds = test_preds[high_mask]
+            high_y_test = y_test[high_mask]
+            high_test_mse = mean_squared_error(high_y_test, high_test_preds)
+            high_test_rmse = np.sqrt(high_test_mse)
+            high_test_mae = np.mean(np.abs(high_y_test - high_test_preds))
+            print("-" * 50)
+            print("HIGH REMOVAL RATE (>80%) EVALUATION")
+            print(f"High-Rate RMSE: {high_test_rmse:.2f}% (Average Error Spread)")
+            print(f"High-Rate MAE:  {high_test_mae:.2f}% (Average Absolute Error)")
+            print("-" * 50)
+        
         # Plot Predicted vs Actual
         plt.figure(figsize=(8, 8))
         plt.scatter(y_test, test_preds, alpha=0.5, color='royalblue', edgecolors='k')
@@ -942,7 +972,7 @@ if __name__ == "__main__":
         top_importances = [importances[i] for i in imp_indices]
 
         plt.figure(figsize=(10, 8))
-        sns.barplot(x=top_importances, y=top_features, palette="viridis")
+        sns.barplot(x=top_importances, y=top_features, hue=top_features, palette="viridis", legend=False)
         plt.title("Top 15 Feature Importances (Permutation)", fontsize=14)
         plt.xlabel("Increase in MSE when feature is shuffled", fontsize=12)
         plt.tight_layout()
